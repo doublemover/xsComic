@@ -2,19 +2,26 @@
   <img src="Assets/Brand/xsComic-lockup.png" alt="xsComic" width="420">
 </p>
 
-**xsComic** is a native macOS reader for CBR, CBZ, and friends. I cooked it up
-because I did not want unvetted third-party software on my work partition—and
-because Codex could make something passable in five minutes.
+**xsComic** is a native macOS reader for CBR/CBZ/etc. I cooked it up
+because I wanted to read *Beastars* (sue me), didn't want unvetted
+third-party software on my work partition, and realized because Codex
+could make something passable in five minutes.
 
-It then became an experiment: can an LLM help make aggressively optimized
-native software whose source is also pleasant for a human being to inspect?
-These tools are famously better at adding code than removing it. Recent models
-seemed good enough to try reversing that tendency.
+I then decided to run an experiment: can an LLM — tools (entities?)
+that have gained infamy for their wild preference for adding lines
+over deleting them — successfully write aggressively footprint-optimized
+software? And can it write code that's "good," not simply "working"?
+Recent models (post-January '26, basically) have seemed, perhaps,
+capable of doing so.
 
-The result is a 510 KB app bundle, about 220 KB of which is icon resources. It
-launches very quickly, has no third-party code, and never accesses the network.
-The source is deliberately small, heavily annotated, and arranged to be read.
-(The RAM footprint could still use some work.)
+*Reader, be advised: LLM writing is to follow.*
+
+I believe the experiment to have been a success. Its result is a 510 KB app bundle,
+about 220 KB of which is icon resources. It launches very quickly and includes no
+third-party code. The source, from what I've seen, is legibile, well-structured,
+and even educational. (The RAM footprint could still use some work.)
+
+*Reader, be advised: human language stops here.*
 
 ## What it does
 
@@ -22,7 +29,7 @@ The source is deliberately small, heavily annotated, and arranged to be read.
 - reads one or two pages at a time, left-to-right or right-to-left
 - offers keyboard controls, pinch-and-drag zooming, fit, and actual size
 - includes a page sidebar, direct page jump, and adjacent-volume continuation
-- quietly prepares the pages you are most likely to turn to next
+- prepares the pages you are most likely to turn to next
 
 The minimum supported system is macOS 14.
 

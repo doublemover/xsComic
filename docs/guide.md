@@ -125,9 +125,11 @@ underlying operation cannot stop immediately.
 borrowed and owned trees:
 
 - an opened directory is borrowed and never removed;
-- an archive is extracted into a unique system-temporary directory owned by
-  that `ArchiveBook`;
-- replacement or deinitialization removes only the owned tree.
+- every process gets one random root under the system temporary directory, so
+  two running copies cannot disturb one another;
+- each archive is extracted into a unique child owned by that `ArchiveBook`;
+- replacement or deinitialization removes the child, while a process-exit
+  handler removes the complete private root on normal application termination.
 
 Extraction runs in a child `bsdtar` process. This keeps archive parsers outside
 the app's address space and avoids shipping a decompressor. Diagnostics are
@@ -271,7 +273,7 @@ The tests are grouped by the production owner they exercise:
 
 | Test file | Principal contract |
 | --- | --- |
-| `ArchiveBookTests.swift` | discovery, ordering, archives, cleanup, cancellation |
+| `ArchiveBookTests.swift` | discovery, ordering, ZIP/tar, traversal and symlink safety, cleanup, cancellation |
 | `ReaderModelTests.swift` | page arithmetic, keys, adjacent volumes, zoom |
 | `PageImageStoreTests.swift` | decode sizing, coalescing, failure and cache bounds |
 | `PrefetchReplayTests.swift` | fixed window and adaptive-policy evidence |
@@ -321,9 +323,11 @@ These are current design limits, not hidden promises:
 - GIF cache accounting intentionally excludes the animated visible object.
   Static previews remain bounded; a pathological animated GIF can use more
   memory than its encoded size suggests.
-- Temporary extraction is cleaned on book replacement and normal object
-  teardown. A forced process kill can leave a uniquely named directory under
-  the system temporary area until the operating system or user cleans it.
+- Temporary extraction is cleaned on book replacement, normal object teardown,
+  and normal application termination. The ordinary exit guarantee comes from a
+  C-level process handler rather than Swift destructors, which macOS need not
+  run at exit. A crash or forced process kill can still leave one uniquely named
+  process directory until the operating system or user cleans it.
 - Adjacent-volume continuation examines only siblings of the current source.
   It is on-demand and deliberately does not maintain a library database.
 - Historical wall-clock metrics are meaningful only on the recorded machine,

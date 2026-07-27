@@ -47,6 +47,27 @@ final class ArchiveBookTests: XCTestCase {
         XCTAssertNil(book.extractedDirectory)
     }
 
+    /// A comic directory may contain aliases or symlinks created by an archive
+    /// tool. Following one would make the page table escape the selected book
+    /// and would turn later decoding into an arbitrary filesystem read.
+    func testDirectoryScanDoesNotFollowSymbolicLinks() throws {
+        let root = try makeTemporaryDirectory()
+        let directory = root.appendingPathComponent("book", isDirectory: true)
+        let outside = root.appendingPathComponent("outside.png")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try writeFile("page.png", in: directory)
+        try Data().write(to: outside)
+        try FileManager.default.createSymbolicLink(
+            at: directory.appendingPathComponent("linked.png"),
+            withDestinationURL: outside
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let book = try ArchiveBook.load(from: directory)
+
+        XCTAssertEqual(book.pages.map(\.lastPathComponent), ["page.png"])
+    }
+
     /// Extension matching is centralized and case-insensitive. This table test
     /// makes adding a decoder format an explicit contract change.
     func testEverySupportedImageExtensionIsRecognizedCaseInsensitively() throws {
@@ -176,6 +197,66 @@ final class ArchiveBookTests: XCTestCase {
             FileManager.default.fileExists(atPath: extractedDirectory.path),
             "Releasing a book must remove its extracted files."
         )
+    }
+
+    /// The tar branch is a separate system-codec path from ZIP. Keep one real
+    /// CBT fixture so the public format table cannot drift into wishful prose.
+    func testCBTArchiveIsExtractedAndSorted() throws {
+        let root = try makeTemporaryDirectory()
+        let input = root.appendingPathComponent("input", isDirectory: true)
+        let archive = root.appendingPathComponent("sample.cbt")
+        try FileManager.default.createDirectory(at: input, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        for name in ["page10.png", "page2.png"] {
+            try writeFile(name, in: input)
+        }
+
+        try ArchiveTestFixture.create(at: archive, from: input, format: "ustar")
+        let book = try ArchiveBook.load(from: archive)
+
+        XCTAssertEqual(book.pages.map(\.lastPathComponent), ["page2.png", "page10.png"])
+    }
+
+    /// libarchive's extraction policy rejects parent traversal before writing.
+    /// This test fixes that host-tool assumption in place: changing tools or
+    /// flags may not silently turn opening a comic into an arbitrary file write.
+    func testArchiveCannotEscapeItsExtractionDirectory() throws {
+        let root = try makeTemporaryDirectory()
+        let input = root.appendingPathComponent("input", isDirectory: true)
+        let nested = input.appendingPathComponent("nested", isDirectory: true)
+        let escapedName = "escape-\(UUID().uuidString).png"
+        let archive = root.appendingPathComponent("traversal.cbz")
+        let escaped = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ComicBookReader", isDirectory: true)
+            .appendingPathComponent(escapedName)
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        try writeFile(escapedName, in: input)
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: escaped)
+        }
+
+        try ArchiveTestFixture.create(
+            at: archive,
+            from: nested,
+            format: "zip",
+            members: ["../\(escapedName)"]
+        )
+
+        XCTAssertThrowsError(try ArchiveBook.load(from: archive)) { error in
+            guard case ArchiveError.extractionFailed = error else {
+                return XCTFail("Expected extractionFailed, got \(error)")
+            }
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: escaped.path))
+        let temporaryRoot = escaped.deletingLastPathComponent()
+        let leakedNames =
+            FileManager.default.enumerator(atPath: temporaryRoot.path)?
+            .compactMap { item -> String? in
+                guard let path = item as? String else { return nil }
+                return URL(fileURLWithPath: path).lastPathComponent
+            } ?? []
+        XCTAssertFalse(leakedNames.contains(escapedName))
     }
 
     /// Failure after successful extraction is the subtle ownership case: the

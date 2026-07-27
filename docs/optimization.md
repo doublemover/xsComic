@@ -23,6 +23,10 @@ snapshot.
 run from 2026-07-25 21:31 PDT.
 `Metrics/icon-mask.json` is the current-macOS icon-geometry correction from
 2026-07-25 21:51 PDT.
+`Metrics/release-x86_64.json` and `Metrics/release-arm64.json` are the current
+architecture-specific release-candidate records.
+`Metrics/dmg.json` records the exact themed disk images and their Finder
+presentation.
 
 ## Summary
 
@@ -49,6 +53,64 @@ stripped `-Osize` executable. Against the initial workspace snapshot:
 The `.tar.xz` comparison to the baseline ZIP is explicitly cross-container:
 the initial snapshot did not preserve a tar/XZ package. Both optimized archives
 contain the same signed app; the ZIP remains for broader convenience.
+
+## Release-confidence audit
+
+The final audit found one real lifecycle leak: a normally quit process did not
+necessarily run `ArchiveBook.deinit`, so its current extracted volume could
+remain in the system temporary area. The accepted repair gives each process one
+random workspace, puts every book extraction beneath it, and registers one
+`atexit` cleanup for the root. Replacement and failure still remove individual
+book directories immediately. Concurrent xsComic processes cannot share a
+workspace, and a crash or forced kill remains honestly delegated to system
+temporary cleanup.
+
+The first correct proposal used an application delegate and cost 8,816 signed
+executable bytes. Moving the invariant to the archive boundary made it both
+stronger and smaller:
+
+| Intel metric | Previous candidate | Audited candidate | Change |
+| --- | ---: | ---: | ---: |
+| Signed executable | 281,872 B | 282,032 B | +160 B (+0.057%) |
+| Logical app bundle | 509,630 B | 509,790 B | +160 B (+0.031%) |
+| Distribution ZIP | 299,685 B | 300,273 B | +588 B (+0.196%) |
+| Distribution tar/XZ | 255,516 B | 255,892 B | +376 B (+0.147%) |
+| Dynamic dependencies | 25 | 25 | no change |
+| `__TEXT` segment | 204,800 B | 204,800 B | no change |
+| Correctness tests | 33 | 36 | +3 |
+
+The ARM64 executable grew by 128 bytes, to 301,056 bytes. Its ZIP is 296,358
+bytes and tar/XZ is 244,644 bytes. Runtime policy is unchanged at 64 MiB,
+12 entries, eight pages ahead, and two pages behind.
+
+The three test additions ship no executable code. They prove that:
+
+- symbolic-link pages cannot escape an opened directory;
+- a parent-traversal archive is rejected without writing outside its private
+  extraction directory; and
+- CBT/tar follows a real system-codec extraction path rather than existing only
+  in documentation.
+
+A packaged CBZ then passed a real process smoke test: Finder-style opening,
+page display and turn, Cmd-Shift-G editing, the page sidebar, and normal Quit.
+The old package left its extraction behind; the audited package removed its
+complete process workspace immediately. Two independent Intel package builds
+also reproduced the executable, symbols file, ZIP, tar/XZ, resources, plist,
+and code-signature resource seal byte for byte.
+
+The DMG packager now removes `.fseventsd`, `.Spotlight-V100`,
+`.TemporaryItems`, and `.Trashes` after Finder writes `.DS_Store`. A read-only
+mount contained only intentional release files and the saved 660 × 468 Finder
+window remained visually correct. Finder/HFS embeds per-image metadata, so
+DMGs are structurally reproducible but not promised byte-identical; the current
+Intel and ARM64 images are 392,878 and 389,132 bytes respectively.
+
+Two full benchmark transactions of the identical production executable varied
+materially under host load: the 4,096-page scan median ranged from 99.617 to
+130.167 ms, while cold preview decode ranged from 19.410 to 26.909 ms. Neither
+path executes the workspace-exit code, the executable bytes were identical,
+and deterministic policy/replay results were unchanged. The later values remain
+in the metric rather than being replaced with the more flattering run.
 
 ## Feature expansion budget
 

@@ -73,6 +73,12 @@ hdiutil attach -quiet -readwrite -noverify -noautoopen \
 MOUNTED=true
 /usr/bin/SetFile -a C "$MOUNT"
 osascript "$ROOT/scripts/layout-dmg.applescript" "$MOUNT"
+
+# Finder has finished writing the one metadata file we want: .DS_Store. Remove
+# transient services' volume-local state before freezing the image. These names
+# are created by macOS itself, never by release source, and encode no layout.
+rm -rf "$MOUNT/.fseventsd" "$MOUNT/.Spotlight-V100" \
+    "$MOUNT/.TemporaryItems" "$MOUNT/.Trashes"
 sync
 hdiutil detach "$MOUNT" -quiet
 MOUNTED=false

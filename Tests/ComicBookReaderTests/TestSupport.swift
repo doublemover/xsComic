@@ -94,13 +94,25 @@ enum ZIPTestFixture {
     /// Tests use the copy of `bsdtar` shipped with macOS, just like production.
     /// No archive library enters either target's dependency graph.
     static func create(at archive: URL, from directory: URL) throws {
+        try ArchiveTestFixture.create(at: archive, from: directory, format: "zip")
+    }
+}
+
+enum ArchiveTestFixture {
+    static func create(
+        at archive: URL,
+        from directory: URL,
+        format: String,
+        members: [String] = ["."]
+    ) throws {
         let process = Process()
         let errorPipe = Pipe()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/bsdtar")
-        process.arguments = [
-            "--format", "zip", "-c", "-f", archive.path,
-            "-C", directory.path, ".",
-        ]
+        process.arguments =
+            [
+                "--format", format, "-c", "-f", archive.path,
+                "-C", directory.path,
+            ] + members
         process.standardOutput = FileHandle.nullDevice
         process.standardError = errorPipe
         try process.run()
@@ -109,7 +121,7 @@ enum ZIPTestFixture {
 
         guard process.terminationStatus == 0 else {
             throw NSError(
-                domain: "ZIPTestFixture",
+                domain: "ArchiveTestFixture",
                 code: Int(process.terminationStatus),
                 userInfo: [
                     NSLocalizedDescriptionKey: String(decoding: errorData, as: UTF8.self)

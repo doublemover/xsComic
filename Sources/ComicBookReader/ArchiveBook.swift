@@ -2,6 +2,30 @@ import Darwin
 import Foundation
 
 /*
+ Every extraction lives below one random per-process workspace. `atexit` is the
+ narrowest reliable normal-termination hook: unlike Swift deinitialization, it
+ is part of the process-exit contract, and unlike an application delegate it
+ adds no UI lifecycle object. A random root isolates concurrently running
+ xsComic processes; book UUIDs below it isolate overlapping loads.
+
+ Replacement still removes an individual book promptly. The exit handler owns
+ the whole process root, including a load that was still in flight when the user
+ quit. A crash or SIGKILL cannot run user code, so the system temporary cleaner
+ remains the last resort for those abnormal exits.
+ */
+private let archiveWorkspace: URL = {
+    let workspace = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ComicBookReader", isDirectory: true)
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    atexit(removeArchiveWorkspace)
+    return workspace
+}()
+
+private func removeArchiveWorkspace() {
+    try? FileManager.default.removeItem(at: archiveWorkspace)
+}
+
+/*
  An ArchiveBook is deliberately a small value-shaped owner around a potentially
  large on-disk working set.
 
@@ -84,10 +108,13 @@ final class ArchiveBook: Sendable {
 
         // Each load gets a private directory.  Concurrent opens cannot collide,
         // and failure cleanup can remove the whole subtree with one operation.
-        let destination = FileManager.default.temporaryDirectory
-            .appendingPathComponent("ComicBookReader", isDirectory: true)
+        let destination =
+            archiveWorkspace
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: destination,
+            withIntermediateDirectories: true
+        )
 
         do {
             try extract(source, to: destination)
@@ -99,6 +126,7 @@ final class ArchiveBook: Sendable {
             // Before ArchiveBook exists there is no owner to run deinit, so this
             // scope rolls back every failure after directory creation succeeds.
             try? FileManager.default.removeItem(at: destination)
+            removeEmptyArchiveWorkspace()
             throw error
         }
     }
@@ -168,6 +196,16 @@ final class ArchiveBook: Sendable {
     func removeTemporaryFiles() {
         guard let extractedDirectory else { return }
         try? FileManager.default.removeItem(at: extractedDirectory)
+        Self.removeEmptyArchiveWorkspace()
+    }
+
+    /*
+     rmdir, unlike FileManager.removeItem, succeeds only for an empty directory.
+     It can therefore trim the process workspace after the last book without
+     racing a concurrent extraction into destructive recursive removal.
+     */
+    private static func removeEmptyArchiveWorkspace() {
+        _ = archiveWorkspace.path.withCString(Darwin.rmdir)
     }
 
     // MARK: - Extraction

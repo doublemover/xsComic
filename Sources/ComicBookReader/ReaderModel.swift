@@ -682,7 +682,7 @@ final class ReaderModel {
      ArchiveBook may own an extracted temporary tree. Deleting it can involve
      thousands of filesystem operations, so replacements and discarded load
      results enqueue utility work rather than stalling MainActor. ArchiveBook's
-     deinit remains the synchronous, best-effort safety net at process teardown.
+     deinit remains the synchronous, best-effort safety net at ordinary release.
      */
     private nonisolated static func removeTemporaryFilesOffMain(
         from book: ArchiveBook?
@@ -692,6 +692,7 @@ final class ReaderModel {
             book.removeTemporaryFiles()
         }
     }
+
 }
 
 /// Internal control flow: absence of a neighbor is not a user-facing failure.

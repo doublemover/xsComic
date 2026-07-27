@@ -196,6 +196,13 @@ positions. The script verifies the app architecture, app signature, and final
 UDIF checksum. With `CBR_SIGN_IDENTITY` set, it also Developer-ID-signs the DMG
 using a secure timestamp.
 
+Finder and HFS write per-image identifiers and timestamps, so two structurally
+identical DMGs need not be byte-for-byte identical; record the checksum and
+size of each exact release image. The packager removes `.fseventsd`,
+`.Spotlight-V100`, `.TemporaryItems`, and `.Trashes` before freezing the image.
+The ZIP and tar/XZ—not the Finder-authored DMGs—are the byte-reproducible
+containers.
+
 Mount each finished image read-only and confirm the background, icon alignment,
 alias target, legal folder, and embedded app signature. Finder counts its
 28-point title bar inside window bounds, so the saved 660 × 468 window exposes

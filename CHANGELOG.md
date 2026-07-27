@@ -11,7 +11,11 @@ Initial xsComic release candidate:
 - page sidebar, page jump, adjacent-volume continuation, keyboard navigation,
   fit/actual/custom zoom, pinch, and panning;
 - primary xsComic icon and optional Azusa-inspired runtime icon;
-- dependency-free SwiftPM build, reproducible packaging, tests, benchmarks, and
-  machine-readable footprint records;
+- dependency-free SwiftPM build, byte-reproducible ZIP/tar packaging, themed
+  drag-to-install DMGs, tests, benchmarks, and machine-readable footprint
+  records;
+- process-private archive extraction with traversal/symlink regression coverage
+  and deterministic cleanup on replacement, failure, cancellation, and normal
+  application exit;
 - AGPL-3.0-or-later software and CC BY-SA 4.0 documentation/metrics, with
   branding expressly excluded from both license grants.

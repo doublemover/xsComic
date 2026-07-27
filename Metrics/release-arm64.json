@@ -2,7 +2,7 @@
   "schema_version": 1,
   "label": "release-arm64",
   "measurement_kind": "cross_architecture_distribution",
-  "measured_at": "2026-07-26T21:46:51-0700",
+  "measured_at": "2026-07-27T02:31:33-0700",
   "environment": {
     "host_macos": "26.5.1",
     "host_architecture": "x86_64",
@@ -12,7 +12,7 @@
   },
   "source": {
     "digest_schema": "cbr-source-digest-v5",
-    "sha256": "401d1431b92055099bbbd91ec9dde12130b5327e8ada2fde39fd425286f1a9e0"
+    "sha256": "57d248c4bfcd1d04ac1279662b1b4b6fa68fa46629bd256b34b11f0f12fa84c8"
   },
   "validation": {
     "compiled": true,
@@ -25,24 +25,24 @@
     "runtime_benchmarks": "not run: an Intel host cannot execute ARM64"
   },
   "distribution": {
-    "signed_executable_bytes": 300928,
-    "retained_symbol_executable_bytes": 649712,
-    "bundle_logical_bytes": 528686,
+    "signed_executable_bytes": 301056,
+    "retained_symbol_executable_bytes": 651056,
+    "bundle_logical_bytes": 528814,
     "bundle_allocated_kib": 532,
-    "zip_bytes": 295793,
-    "tar_xz_bytes": 244264,
+    "zip_bytes": 296358,
+    "tar_xz_bytes": 244644,
     "dynamic_dependencies": 25,
     "mach_o": {
       "text_segment_bytes": 212992,
-      "text_section_bytes": 161908,
+      "text_section_bytes": 163204,
       "data_const_segment_bytes": 16384,
       "data_segment_bytes": 16384,
       "linkedit_segment_bytes": 65536
     }
   },
   "sha256": {
-    "signed_executable": "c9df63a67ab45a373d9687d2409f8453caa5d25c9ac955acb52f0dd538b4e72f",
-    "zip": "5db4648fb2e86cbdbf1809d7e71670c78743d86a993348513c41f9df10491d3d",
-    "tar_xz": "2e82e21fc36280974273e55442d9559c7039032872a891a2d8b535dc162127a2"
+    "signed_executable": "61ca955900c57f1fb82a0d65d9d74c274f754244daa588be09cc61bdbd5c7a4c",
+    "zip": "8cddde933da3037de6a40a7ac17a523f1b605c13293c98468cda140dc540b52e",
+    "tar_xz": "021c1be7e0558deedf25db8bbe3e4bd70cbfa7875bbab061d13919496bf7fce4"
   }
 }

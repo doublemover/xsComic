@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
   "label": "dmg",
-  "measured_at": "2026-07-26T22:01:39-0700",
+  "measured_at": "2026-07-27T02:31:33-0700",
   "source": {
     "digest_schema": "cbr-source-digest-v5",
-    "sha256": "92a6fa444b5b5adcf47b3fe90a1f135c3ba8656a911ae4184a1382ce64cba4d5"
+    "sha256": "57d248c4bfcd1d04ac1279662b1b4b6fa68fa46629bd256b34b11f0f12fa84c8"
   },
   "presentation": {
     "format": "UDIF read-only compressed (LZFSE)",
@@ -15,18 +15,20 @@
     "app_position": [175, 220],
     "applications_position": [499, 220],
     "licenses_position": [342, 355],
-    "applications_target": "/Applications"
+    "applications_target": "/Applications",
+    "transient_service_directories_removed": true,
+    "byte_reproducible": false
   },
   "x86_64": {
-    "bytes": 392478,
-    "sha256": "d5144c5ca06407d363aff20b0851ee85b067622e84028edeccea1ad601760747",
+    "bytes": 392878,
+    "sha256": "bcc31291f65e24627a84d4d9478382ea14a8cc1ec63a6189380d8b9422090a1d",
     "architecture": "x86_64",
     "image_checksum_valid": true,
     "app_signature_valid": true
   },
   "arm64": {
-    "bytes": 389284,
-    "sha256": "15c3b4162b3c4e5b6f793f1bd55ddfa9a87fdf0aad39e5342f2a475c2eae98ec",
+    "bytes": 389132,
+    "sha256": "c7f7cdeef5105e9e6b3e4096a5ea23e6591e1b3ca6755ae18e65762b70470aae",
     "architecture": "arm64",
     "image_checksum_valid": true,
     "app_signature_valid": true

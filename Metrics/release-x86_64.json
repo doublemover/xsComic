@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "label": "release-x86_64",
-  "measured_at": "2026-07-26T21:46:11-0700",
+  "measured_at": "2026-07-27T02:30:27-0700",
   "environment": {
     "macos": "26.5.1",
     "architecture": "x86_64",
@@ -22,32 +22,32 @@
       "Tests regular files except .DS_Store",
       "scripts regular files except .DS_Store"
     ],
-    "sha256": "401d1431b92055099bbbd91ec9dde12130b5327e8ada2fde39fd425286f1a9e0"
+    "sha256": "57d248c4bfcd1d04ac1279662b1b4b6fa68fa46629bd256b34b11f0f12fa84c8"
   },
   "production_source": {
     "swift_files": 6,
-    "lines": 2697,
-    "bytes": 110678
+    "lines": 2736,
+    "bytes": 112160
   },
   "correctness": {
-    "tests_executed": 33,
+    "tests_executed": 36,
     "tests_skipped": 4,
     "tests_failed": 0
   },
   "archive_scan": {
     "page_count": 4096,
     "samples": 7,
-    "median_ms": 88.635,
-    "fastest_ms": 87.580,
-    "slowest_ms": 95.304
+    "median_ms": 130.167,
+    "fastest_ms": 124.949,
+    "slowest_ms": 140.762
   },
   "cbz_open": {
     "page_count": 128,
     "archive_bytes": 1071430,
     "samples": 5,
-    "median_ms": 120.444,
-    "fastest_ms": 117.701,
-    "slowest_ms": 128.025
+    "median_ms": 146.588,
+    "fastest_ms": 145.094,
+    "slowest_ms": 153.409
   },
   "image_decode": {
     "source_width": 1600,
@@ -55,8 +55,8 @@
     "preview_dimension": 768,
     "cold_samples": 5,
     "cache_samples": 7,
-    "cold_ms": 18.857,
-    "cache_hit_ms": 0.000889,
+    "cold_ms": 26.909,
+    "cache_hit_ms": 0.001126,
     "decoded_bytes": 1769472
   },
   "prefetch_replay": {
@@ -70,21 +70,21 @@
     "losing_cases": 0
   },
   "build_and_package": {
-    "seconds": 19.072,
-    "scratch_existed": false,
+    "seconds": 21.794,
+    "scratch_existed": true,
     "scratch_cleaned": true
   },
   "distribution": {
-    "signed_executable_bytes": 281872,
-    "retained_symbol_executable_bytes": 611768,
-    "bundle_logical_bytes": 509630,
+    "signed_executable_bytes": 282032,
+    "retained_symbol_executable_bytes": 613128,
+    "bundle_logical_bytes": 509790,
     "bundle_allocated_kib": 512,
-    "zip_bytes": 299685,
-    "tar_xz_bytes": 255516,
+    "zip_bytes": 300273,
+    "tar_xz_bytes": 255892,
     "dynamic_dependencies": 25,
     "mach_o": {
       "text_segment_bytes": 204800,
-      "text_section_bytes": 162400,
+      "text_section_bytes": 163520,
       "data_const_segment_bytes": 12288,
       "data_segment_bytes": 16384,
       "linkedit_segment_bytes": 65536
