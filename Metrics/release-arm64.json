@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "label": "release-arm64",
+  "measurement_kind": "cross_architecture_distribution",
+  "measured_at": "2026-07-26T21:46:51-0700",
+  "environment": {
+    "host_macos": "26.5.1",
+    "host_architecture": "x86_64",
+    "target_triple": "arm64-apple-macosx14.0",
+    "swift": "6.3.2",
+    "minimum_target": "macOS 14.0"
+  },
+  "source": {
+    "digest_schema": "cbr-source-digest-v5",
+    "sha256": "401d1431b92055099bbbd91ec9dde12130b5327e8ada2fde39fd425286f1a9e0"
+  },
+  "validation": {
+    "compiled": true,
+    "mach_o_architecture": "arm64",
+    "plist_valid": true,
+    "signature_valid": true,
+    "zip_valid": true,
+    "tar_xz_valid": true,
+    "runtime_tests": "not run: an Intel host cannot execute ARM64",
+    "runtime_benchmarks": "not run: an Intel host cannot execute ARM64"
+  },
+  "distribution": {
+    "signed_executable_bytes": 300928,
+    "retained_symbol_executable_bytes": 649712,
+    "bundle_logical_bytes": 528686,
+    "bundle_allocated_kib": 532,
+    "zip_bytes": 295793,
+    "tar_xz_bytes": 244264,
+    "dynamic_dependencies": 25,
+    "mach_o": {
+      "text_segment_bytes": 212992,
+      "text_section_bytes": 161908,
+      "data_const_segment_bytes": 16384,
+      "data_segment_bytes": 16384,
+      "linkedit_segment_bytes": 65536
+    }
+  },
+  "sha256": {
+    "signed_executable": "c9df63a67ab45a373d9687d2409f8453caa5d25c9ac955acb52f0dd538b4e72f",
+    "zip": "5db4648fb2e86cbdbf1809d7e71670c78743d86a993348513c41f9df10491d3d",
+    "tar_xz": "2e82e21fc36280974273e55442d9559c7039032872a891a2d8b535dc162127a2"
+  }
+}

@@ -1,0 +1,52 @@
+# macOS and Finder
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# SwiftPM and Xcode
+.build/
+.swiftpm/
+DerivedData/
+*.xcuserstate
+*.xccheckout
+*.xcscmblueprint
+
+# Local build and distribution products
+build/
+
+# Editor and tool state
+.codex/
+*.swp
+*.tmp
+*~
+
+# Local configuration and signing material
+.env
+.env.*
+!.env.example
+*.cer
+*.key
+*.mobileprovision
+*.p12
+*.provisionprofile
+
+# Measurement runs are local by default. Historical checkpoints are admitted
+# deliberately so a new label cannot enter a release unnoticed.
+Metrics/*.json
+!Metrics/baseline.json
+!Metrics/optimized.json
+!Metrics/features.json
+!Metrics/quality.json
+!Metrics/branding.json
+!Metrics/alternate-icon.json
+!Metrics/readability.json
+!Metrics/release.json
+!Metrics/icon-mask.json
+!Metrics/icon-fit.json
+!Metrics/runtime-icon-mask.json
+!Metrics/icon-proportions.json
+!Metrics/native-runtime-mask.json
+!Metrics/release-x86_64.json
+!Metrics/release-arm64.json
+!Metrics/dmg.json

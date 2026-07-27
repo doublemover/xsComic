@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "label": "baseline",
+  "measured_at": "2026-07-25T11:13:11-07:00",
+  "environment": {
+    "macos": "26.5.1",
+    "architecture": "x86_64",
+    "swift": "6.3.2",
+    "minimum_target": "macOS 14.0"
+  },
+  "source": {
+    "state": "initial workspace snapshot",
+    "sha256": null,
+    "note": "The repository had no commits and the exact initial source tree was not preserved as a digest."
+  },
+  "provenance": {
+    "archive_scan": "Measured from the initial source before production edits using the subsequently preserved 4096-page benchmark shape.",
+    "distribution": "Measured from the pre-existing signed app bundle found in the workspace; the ZIP was a metadata-minimized repackage of that bundle, not a source rebuild.",
+    "clean_release_build": "A one-off clean SwiftPM release-build observation; exact command output was not preserved.",
+    "runtime": "An observed app-process sample; workload and launch state were not preserved.",
+    "limitation": "This is an observational baseline, not a bit-for-bit reproducible artifact."
+  },
+  "correctness": {
+    "tests_passed": 6,
+    "tests_failed": 0
+  },
+  "archive_scan": {
+    "page_count": 4096,
+    "samples": 7,
+    "median_ms": 562.619,
+    "fastest_ms": 536.727,
+    "slowest_ms": 575.225
+  },
+  "clean_release_build": {
+    "seconds": 15.97
+  },
+  "distribution": {
+    "signed_executable_bytes": 379536,
+    "bundle_logical_bytes": 383166,
+    "bundle_allocated_kib": 380,
+    "zip_bytes": 101113,
+    "dynamic_dependencies": 23,
+    "mach_o": {
+      "text_segment_bytes": 102400,
+      "text_section_bytes": 74704,
+      "data_const_segment_bytes": 8192,
+      "data_segment_bytes": 8192,
+      "linkedit_segment_bytes": 278528
+    }
+  },
+  "runtime": {
+    "idle_physical_mib": 49,
+    "idle_peak_physical_mib": 57,
+    "image_loading": "synchronous on the main actor",
+    "image_cache_limit_bytes": 268435456,
+    "forward_prefetch_pages": 0,
+    "backward_buffer_pages": 0
+  }
+}

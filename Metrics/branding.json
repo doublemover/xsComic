@@ -1,0 +1,96 @@
+{
+  "schema_version": 2,
+  "label": "branding",
+  "measured_at": "2026-07-25T16:49:28-0700",
+  "environment": {
+    "macos": "26.5.1",
+    "architecture": "x86_64",
+    "swift": "6.3.2",
+    "minimum_target": "macOS 14.0"
+  },
+  "source": {
+    "digest_schema": "cbr-source-digest-v2",
+    "digest_scope": [
+      "Package.swift",
+      "Package.resolved when present",
+      "Assets regular files",
+      "Sources regular files",
+      "Tests regular files",
+      "scripts regular files"
+    ],
+    "sha256": "8e53b28b819114db736a747ed47a1bcbfcbb1cfdf283ca5eb0d79428702414e9"
+  },
+  "production_source": {
+    "swift_files": 6,
+    "lines": 1558,
+    "bytes": 52875
+  },
+  "correctness": {
+    "tests_executed": 33,
+    "tests_skipped": 4,
+    "tests_failed": 0
+  },
+  "archive_scan": {
+    "page_count": 4096,
+    "samples": 7,
+    "median_ms": 82.713,
+    "fastest_ms": 80.831,
+    "slowest_ms": 87.246
+  },
+  "cbz_open": {
+    "page_count": 128,
+    "archive_bytes": 1071430,
+    "samples": 5,
+    "median_ms": 115.588,
+    "fastest_ms": 109.183,
+    "slowest_ms": 120.401
+  },
+  "image_decode": {
+    "source_width": 1600,
+    "source_height": 1200,
+    "preview_dimension": 768,
+    "cold_samples": 5,
+    "cache_samples": 7,
+    "cold_ms": 16.706,
+    "cache_hit_ms": 0.000825,
+    "decoded_bytes": 1769472
+  },
+  "prefetch_replay": {
+    "static_demand_misses": 9884,
+    "adaptive_demand_misses": 9087,
+    "static_stalled_turns": 7164,
+    "adaptive_stalled_turns": 6719,
+    "static_prefetch_decodes": 46105,
+    "adaptive_prefetch_decodes": 46649,
+    "winning_cases": 21,
+    "losing_cases": 0
+  },
+  "build_and_package": {
+    "seconds": 17.515,
+    "scratch_existed": false,
+    "scratch_cleaned": true
+  },
+  "distribution": {
+    "signed_executable_bytes": 277680,
+    "retained_symbol_executable_bytes": 602336,
+    "bundle_logical_bytes": 398202,
+    "bundle_allocated_kib": 396,
+    "zip_bytes": 202301,
+    "tar_xz_bytes": 183760,
+    "dynamic_dependencies": 25,
+    "mach_o": {
+      "text_segment_bytes": 200704,
+      "text_section_bytes": 159584,
+      "data_const_segment_bytes": 12288,
+      "data_segment_bytes": 16384,
+      "linkedit_segment_bytes": 65536
+    }
+  },
+  "runtime_policy": {
+    "image_loading": "off-main immediate decode",
+    "image_cache_limit_bytes": 67108864,
+    "image_cache_entry_limit": 12,
+    "forward_prefetch_pages": 8,
+    "backward_buffer_pages": 2
+  }
+}

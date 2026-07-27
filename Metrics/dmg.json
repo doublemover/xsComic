@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "label": "dmg",
+  "measured_at": "2026-07-26T22:01:39-0700",
+  "source": {
+    "digest_schema": "cbr-source-digest-v5",
+    "sha256": "92a6fa444b5b5adcf47b3fe90a1f135c3ba8656a911ae4184a1382ce64cba4d5"
+  },
+  "presentation": {
+    "format": "UDIF read-only compressed (LZFSE)",
+    "filesystem": "HFS+",
+    "background_pixels": [660, 440],
+    "window_points": [660, 468],
+    "icon_size_points": 112,
+    "app_position": [175, 220],
+    "applications_position": [499, 220],
+    "licenses_position": [342, 355],
+    "applications_target": "/Applications"
+  },
+  "x86_64": {
+    "bytes": 392478,
+    "sha256": "d5144c5ca06407d363aff20b0851ee85b067622e84028edeccea1ad601760747",
+    "architecture": "x86_64",
+    "image_checksum_valid": true,
+    "app_signature_valid": true
+  },
+  "arm64": {
+    "bytes": 389284,
+    "sha256": "15c3b4162b3c4e5b6f793f1bd55ddfa9a87fdf0aad39e5342f2a475c2eae98ec",
+    "architecture": "arm64",
+    "image_checksum_valid": true,
+    "app_signature_valid": true
+  }
+}
