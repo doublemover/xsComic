@@ -62,8 +62,3 @@ The software is **AGPL-3.0-or-later**. Documentation and measurements are
 **CC BY-SA 4.0**. The xsComic name and everything under `Assets/` are expressly
 excluded: no license is granted for the branding or character artwork. The
 short, unambiguous map is in [`LICENSING.md`](LICENSING.md).
-
-This is still a release candidate. Before publishing a binary, the project
-needs a permanent bundle identifier, public support/security contact,
-Developer ID signature, and notarization. Those decisions are left to the
-eventual publisher rather than guessed here.
