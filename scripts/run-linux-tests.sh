@@ -20,7 +20,7 @@ if ! is_native_objc3_linux; then
         exit 1
     fi
     exec "$ROOT/scripts/docker-env.sh" \
-        env XSCOMIC_DOCKER_DELEGATED=1 \
+        env XSCOMIC_DOCKER_DELEGATED=1 XSCOMIC_TEST_SANITIZER="${XSCOMIC_TEST_SANITIZER:-}" \
         bash /work/scripts/run-linux-tests.sh "$@"
 fi
 
@@ -37,7 +37,25 @@ cd "$ROOT"
 
 SRC_DIR="$ROOT/Sources/xsComicLinux"
 TEST_SRC="$ROOT/Tests/xsComicLinuxTests/main.objc3"
+SANITIZER_FLAGS=()
 OUT_DIR="$ROOT/build/linux-tests"
+case "${XSCOMIC_TEST_SANITIZER:-}" in
+    "") ;;
+    address)
+        SANITIZER_FLAGS=(-fsanitize=address,undefined -fno-omit-frame-pointer -g)
+        export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=1}"
+        export UBSAN_OPTIONS="${UBSAN_OPTIONS:-halt_on_error=1}"
+        OUT_DIR="$OUT_DIR-address"
+        ;;
+    thread)
+        SANITIZER_FLAGS=(-fsanitize=thread -fno-omit-frame-pointer -g)
+        OUT_DIR="$OUT_DIR-thread"
+        ;;
+    *)
+        echo "XSCOMIC_TEST_SANITIZER must be address or thread." >&2
+        exit 2
+        ;;
+esac
 OBJ_DIR="$OUT_DIR/obj"
 OUT_BIN="$OUT_DIR/xsComicLinuxTests"
 
@@ -91,11 +109,11 @@ for src in "${SOURCES[@]}"; do
         base="test_main"
     fi
     obj="$OBJ_DIR/$base.o"
-    objc3c "${COMPILE_FLAGS[@]}" -c "$src" -o "$obj"
+    objc3c "${COMPILE_FLAGS[@]}" "${SANITIZER_FLAGS[@]}" -c "$src" -o "$obj"
     OBJECTS+=("$obj")
 done
 
-objc3c "${OBJECTS[@]}" "${LINK_FLAGS[@]}" -o "$OUT_BIN"
+objc3c "${OBJECTS[@]}" "${LINK_FLAGS[@]}" "${SANITIZER_FLAGS[@]}" -o "$OUT_BIN"
 chmod 755 "$OUT_BIN"
 
 exec "$OUT_BIN" "$@"

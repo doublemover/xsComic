@@ -34,21 +34,15 @@ Environment:
   CBR_OUTPUT_DIR            Output directory for xscomic binary (default: build/linux)
   XSCOMIC_USE_XVFB=1        Force launching under xvfb-run with software GL
   XSCOMIC_DOCKER_IMAGE      Override Docker image tag (default: xscomic-objc3:dev)
+  XSCOMIC_LIBRARY_DIR       Expose this host comic library read-only in Docker
 EOF
 }
 
 BUILD_CONFIG="release"
-APP_ARGS=()
-HAS_SCREENSHOT=false
-
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --release)
-            BUILD_CONFIG="release"
-            shift
-            ;;
-        --debug)
-            BUILD_CONFIG="debug"
+        --release|--debug)
+            BUILD_CONFIG="${1#--}"
             shift
             ;;
         -h|--help)
@@ -57,25 +51,17 @@ while [[ $# -gt 0 ]]; do
             ;;
         --)
             shift
-            while [[ $# -gt 0 ]]; do
-                if [[ "$1" == "--screenshot" || "$1" == --screenshot=* ]]; then
-                    HAS_SCREENSHOT=true
-                fi
-                APP_ARGS+=("$1")
-                shift
-            done
             break
             ;;
-        *)
-            while [[ $# -gt 0 ]]; do
-                if [[ "$1" == "--screenshot" || "$1" == --screenshot=* ]]; then
-                    HAS_SCREENSHOT=true
-                fi
-                APP_ARGS+=("$1")
-                shift
-            done
-            break
-            ;;
+        *) break ;;
+    esac
+done
+APP_ARGS=("$@")
+HAS_SCREENSHOT=false
+for arg in "$@"; do
+    case "$arg" in
+        --) break ;;
+        --screenshot|--screenshot=*) HAS_SCREENSHOT=true ;;
     esac
 done
 
@@ -85,16 +71,43 @@ is_native_objc3_linux() {
     }
 }
 
-rewrite_repo_path_for_docker() {
-    local arg="$1"
-    if [[ "$arg" == "$ROOT" ]]; then
-        printf '/work\n'
-    elif [[ "$arg" == "$ROOT/"* ]]; then
-        printf '/work/%s\n' "${arg#"$ROOT/"}"
-    elif [[ "$arg" == --screenshot="$ROOT/"* ]]; then
-        printf '--screenshot=/work/%s\n' "${arg#--screenshot="$ROOT/"}"
+host_path() {
+    local path="$1" parent
+    if [[ -d "$path" ]]; then
+        (cd -- "$path" && pwd -P)
     else
-        printf '%s\n' "$arg"
+        parent=$(cd -- "$(dirname -- "$path")" && pwd -P) || return 1
+        printf '%s/%s\n' "${parent%/}" "${path##*/}"
+    fi
+}
+
+add_docker_bind() {
+    local source="${1//\"/\"\"}" target="${2//\"/\"\"}"
+    DOCKER_FLAGS+=(--run-arg --mount --run-arg "type=bind,\"source=$source\",\"target=$target\"${3:+,$3}")
+}
+
+map_docker_path() {
+    local path="$1" kind="$2" resolved
+    DOCKER_PATH="$path"
+    if ! resolved=$(host_path "$path" 2>/dev/null); then
+        return 1
+    fi
+    if [[ "$resolved" == "$ROOT" ]]; then
+        DOCKER_PATH=/work
+    elif [[ "$resolved" == "$ROOT/"* ]]; then
+        DOCKER_PATH="/work/${resolved#"$ROOT/"}"
+    elif [[ -n "$library" && "$kind" == book && "$resolved" == "$library" ]]; then
+        DOCKER_PATH=/comics
+    elif [[ -n "$library" && "$kind" == book && "$resolved" == "${library%/}/"* ]]; then
+        DOCKER_PATH="/comics/${resolved#"${library%/}/"}"
+    elif [[ "$kind" == screenshot ]]; then
+        add_docker_bind "$(dirname -- "$resolved")" /screenshot-output
+        DOCKER_PATH="/screenshot-output/${resolved##*/}"
+    elif [[ -e "$resolved" ]]; then
+        DOCKER_PATH="/book-argument/${resolved##*/}"
+        add_docker_bind "$resolved" "$DOCKER_PATH" readonly
+    else
+        return 1
     fi
 }
 
@@ -104,77 +117,139 @@ if ! is_native_objc3_linux; then
         exit 1
     fi
 
+    DOCKER_FLAGS=()
     DOCKER_ARGS=()
-    for a in ${APP_ARGS[@]+"${APP_ARGS[@]}"}; do
-        DOCKER_ARGS+=("$(rewrite_repo_path_for_docker "$a")")
+    library=
+    if [[ -n "${XSCOMIC_LIBRARY_DIR:-}" ]]; then
+        if [[ ! -d "$XSCOMIC_LIBRARY_DIR" ]]; then
+            echo "Error: XSCOMIC_LIBRARY_DIR must be an existing directory." >&2
+            exit 2
+        fi
+        library=$(host_path "$XSCOMIC_LIBRARY_DIR")
+        add_docker_bind "$library" /comics readonly
+        DOCKER_FLAGS+=(--run-arg -e --run-arg "XSCOMIC_HOST_LIBRARY_DIR=$library")
+    fi
+    DOCKER_FLAGS+=(--run-arg -e --run-arg "XSCOMIC_HOST_CHECKOUT=$ROOT")
+
+    positional_only=false
+    saw_book=false
+    saw_screenshot=false
+    while [[ $# -gt 0 ]]; do
+        arg="$1"
+        shift
+        if [[ "$positional_only" == false ]]; then
+            case "$arg" in
+                --)
+                    positional_only=true
+                    DOCKER_ARGS+=("$arg")
+                    continue
+                    ;;
+                --screenshot|--screenshot=*)
+                    if [[ "$saw_screenshot" == true ]]; then
+                        echo "Error: specify --screenshot once." >&2
+                        exit 2
+                    fi
+                    saw_screenshot=true
+                    if [[ "$arg" == --screenshot ]]; then
+                        if [[ $# -eq 0 || "$1" == -* ]]; then
+                            DOCKER_ARGS+=("$arg")
+                            continue
+                        fi
+                        path="$1"
+                        shift
+                    else
+                        path="${arg#*=}"
+                    fi
+                    if [[ -z "$path" ]]; then
+                        DOCKER_ARGS+=(--screenshot=)
+                        continue
+                    fi
+                    if ! map_docker_path "$path" screenshot; then
+                        echo "Error: screenshot output directory does not exist: $path" >&2
+                        exit 2
+                    fi
+                    DOCKER_ARGS+=("--screenshot=$DOCKER_PATH")
+                    continue
+                    ;;
+                --page|--zoom|--size|--window-size)
+                    DOCKER_ARGS+=("$arg")
+                    if [[ $# -gt 0 && "$1" != -* ]]; then
+                        DOCKER_ARGS+=("$1")
+                        shift
+                    fi
+                    continue
+                    ;;
+                -*)
+                    DOCKER_ARGS+=("$arg")
+                    continue
+                    ;;
+            esac
+        fi
+        if [[ "$saw_book" == true ]]; then
+            echo "Error: specify a single book path." >&2
+            exit 2
+        fi
+        saw_book=true
+        if [[ -z "$arg" ]] || ! map_docker_path "$arg" book; then
+            echo "Error: book path does not exist: $arg" >&2
+            exit 2
+        fi
+        DOCKER_ARGS+=("$DOCKER_PATH")
     done
 
-    # Interactive X11/Wayland passthrough on a Linux host without native objc3c.
-    if [[ "$(uname -s)" == "Linux" && "$HAS_SCREENSHOT" == false && "${XSCOMIC_USE_XVFB:-0}" != "1" \
-          && ( -n "${DISPLAY:-}" || -n "${WAYLAND_DISPLAY:-}" ) ]]; then
-        "$ROOT/scripts/build-linux.sh" "--$BUILD_CONFIG"
-        IMAGE="${XSCOMIC_DOCKER_IMAGE:-xscomic-objc3:dev}"
-        DOCKER_RUN_FLAGS=(--rm --init -v "$ROOT:/work" -w /work)
-        if [[ -t 0 && -t 1 ]]; then
-            DOCKER_RUN_FLAGS+=(-it)
-        fi
+    if [[ "$(uname -s)" == Linux && "$HAS_SCREENSHOT" == false && "${XSCOMIC_USE_XVFB:-0}" != 1 ]]; then
         if [[ -n "${DISPLAY:-}" ]]; then
-            DOCKER_RUN_FLAGS+=(-e "DISPLAY=$DISPLAY")
+            DOCKER_FLAGS+=(--run-arg -e --run-arg "DISPLAY=$DISPLAY")
             if [[ -d /tmp/.X11-unix ]]; then
-                DOCKER_RUN_FLAGS+=(-v /tmp/.X11-unix:/tmp/.X11-unix)
+                add_docker_bind /tmp/.X11-unix /tmp/.X11-unix readonly
             fi
-            if [[ -n "${XAUTHORITY:-}" && -f "$XAUTHORITY" ]]; then
-                DOCKER_RUN_FLAGS+=(-e "XAUTHORITY=$XAUTHORITY" -v "$XAUTHORITY:$XAUTHORITY:ro")
+            xauth="${XAUTHORITY:-$HOME/.Xauthority}"
+            if [[ -f "$xauth" ]]; then
+                add_docker_bind "$(host_path "$xauth")" /tmp/xscomic-Xauthority readonly
+                DOCKER_FLAGS+=(--run-arg -e --run-arg XAUTHORITY=/tmp/xscomic-Xauthority)
             fi
         fi
-        if [[ -n "${WAYLAND_DISPLAY:-}" && -n "${XDG_RUNTIME_DIR:-}" \
-              && -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]]; then
-            DOCKER_RUN_FLAGS+=(
-                -e "WAYLAND_DISPLAY=$WAYLAND_DISPLAY"
-                -e "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR"
-                -v "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY:$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY"
-            )
+        if [[ -n "${WAYLAND_DISPLAY:-}" && -n "${XDG_RUNTIME_DIR:-}" ]]; then
+            wayland_socket="$WAYLAND_DISPLAY"
+            if [[ "$wayland_socket" != /* ]]; then
+                wayland_socket="$XDG_RUNTIME_DIR/$wayland_socket"
+            fi
+            if [[ -S "$wayland_socket" ]]; then
+                add_docker_bind "$wayland_socket" /tmp/xscomic-wayland readonly
+                DOCKER_FLAGS+=(--run-arg -e --run-arg WAYLAND_DISPLAY=/tmp/xscomic-wayland
+                               --run-arg -e --run-arg XDG_RUNTIME_DIR=/tmp)
+            fi
         fi
         if [[ -d /dev/dri ]]; then
-            DOCKER_RUN_FLAGS+=(--device /dev/dri:/dev/dri)
+            DOCKER_FLAGS+=(--run-arg --device --run-arg /dev/dri:/dev/dri)
+            for render_node in /dev/dri/renderD*; do
+                [[ -c "$render_node" ]] || continue
+                DOCKER_FLAGS+=(--run-arg --group-add --run-arg "$(stat -c '%g' "$render_node")")
+            done
         fi
-        CONTAINER_OUTPUT_DIR="/work/build/linux"
-        if [[ -n "${CBR_OUTPUT_DIR:-}" ]]; then
-            if [[ "$CBR_OUTPUT_DIR" != /* ]]; then
-                CONTAINER_OUTPUT_DIR="/work/$CBR_OUTPUT_DIR"
-            elif [[ "$CBR_OUTPUT_DIR" == "$ROOT/"* ]]; then
-                CONTAINER_OUTPUT_DIR="/work/${CBR_OUTPUT_DIR#"$ROOT/"}"
-            fi
-        fi
-        exec docker run "${DOCKER_RUN_FLAGS[@]}" "$IMAGE" \
-            "$CONTAINER_OUTPUT_DIR/xscomic" ${DOCKER_ARGS[@]+"${DOCKER_ARGS[@]}"}
     fi
 
     DOCKER_ENV_ARGS=(XSCOMIC_DOCKER_DELEGATED=1)
-    if [[ -n "${XSCOMIC_USE_XVFB:-}" ]]; then
-        DOCKER_ENV_ARGS+=("XSCOMIC_USE_XVFB=$XSCOMIC_USE_XVFB")
-    fi
-    if [[ -n "${LIBGL_ALWAYS_SOFTWARE:-}" ]]; then
-        DOCKER_ENV_ARGS+=("LIBGL_ALWAYS_SOFTWARE=$LIBGL_ALWAYS_SOFTWARE")
-    fi
-    if [[ -n "${XSCOMIC_NO_LTO:-}" ]]; then
-        DOCKER_ENV_ARGS+=("XSCOMIC_NO_LTO=$XSCOMIC_NO_LTO")
-    fi
-    if [[ -n "${CBR_SCRATCH_PATH:-}" ]]; then
-        if [[ "$CBR_SCRATCH_PATH" != /* ]]; then
-            DOCKER_ENV_ARGS+=("CBR_SCRATCH_PATH=$CBR_SCRATCH_PATH")
-        elif [[ "$CBR_SCRATCH_PATH" == "$ROOT/"* ]]; then
-            DOCKER_ENV_ARGS+=("CBR_SCRATCH_PATH=${CBR_SCRATCH_PATH#"$ROOT/"}")
+    for name in XSCOMIC_USE_XVFB LIBGL_ALWAYS_SOFTWARE XSCOMIC_NO_LTO; do
+        value="${!name:-}"
+        if [[ -n "$value" ]]; then
+            DOCKER_ENV_ARGS+=("$name=$value")
         fi
-    fi
-    if [[ -n "${CBR_OUTPUT_DIR:-}" ]]; then
-        if [[ "$CBR_OUTPUT_DIR" != /* ]]; then
-            DOCKER_ENV_ARGS+=("CBR_OUTPUT_DIR=$CBR_OUTPUT_DIR")
-        elif [[ "$CBR_OUTPUT_DIR" == "$ROOT/"* ]]; then
-            DOCKER_ENV_ARGS+=("CBR_OUTPUT_DIR=${CBR_OUTPUT_DIR#"$ROOT/"}")
+    done
+    for name in CBR_SCRATCH_PATH CBR_OUTPUT_DIR; do
+        value="${!name:-}"
+        if [[ -z "$value" ]]; then
+            continue
         fi
-    fi
-    exec "$ROOT/scripts/docker-env.sh" \
+        if [[ "$value" == "$ROOT/"* ]]; then
+            value="${value#"$ROOT/"}"
+        elif [[ "$value" == /* ]]; then
+            echo "Error: $name must be inside the checkout for Docker builds." >&2
+            exit 2
+        fi
+        DOCKER_ENV_ARGS+=("$name=$value")
+    done
+    exec "$ROOT/scripts/docker-env.sh" ${DOCKER_FLAGS[@]+"${DOCKER_FLAGS[@]}"} -- \
         env "${DOCKER_ENV_ARGS[@]}" \
         bash /work/scripts/build-and-run-linux.sh "--$BUILD_CONFIG" -- ${DOCKER_ARGS[@]+"${DOCKER_ARGS[@]}"}
 fi
@@ -195,7 +270,7 @@ fi
 USE_XVFB=false
 if [[ "${XSCOMIC_USE_XVFB:-0}" == "1" ]]; then
     USE_XVFB=true
-elif [[ "$HAS_SCREENSHOT" == true && -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" ]]; then
+elif [[ "$HAS_SCREENSHOT" == true && -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" && "${SDL_VIDEODRIVER:-}" != offscreen ]]; then
     USE_XVFB=true
 fi
 
@@ -210,7 +285,7 @@ if [[ "$USE_XVFB" == true ]]; then
     exit $?
 fi
 
-if [[ -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" ]]; then
+if [[ -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" && "${SDL_VIDEODRIVER:-}" != offscreen ]]; then
     echo "Error: neither DISPLAY nor WAYLAND_DISPLAY is set." >&2
     echo "Run interactively on a Linux X11/Wayland session, set XSCOMIC_USE_XVFB=1, or pass --screenshot <out.png>." >&2
     exit 1

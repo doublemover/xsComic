@@ -80,9 +80,12 @@ RUN set -eu; \
         mesa-utils \
         xvfb \
         xauth \
+        xdotool \
         fonts-dejavu-core \
         python3 \
-        python3-pil; \
+        python3-pil \
+        zenity; \
+    install -d -m 1777 /tmp/.X11-unix; \
     rm -rf /var/lib/apt/lists/*
 
 # Configure SDK environment for both non-login invocations and login shells,

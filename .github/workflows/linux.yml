@@ -1,0 +1,38 @@
+name: Linux
+
+on:
+  pull_request:
+    branches: [master, port_slopjective_c]
+  push:
+    branches: [master, port_slopjective_c]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sdk:
+    name: Linux ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86-64
+            runner: ubuntu-24.04
+          - arch: AArch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build pinned SDK image
+        run: ./scripts/docker-env.sh --build
+      - name: Build release and run core assertions
+        run: |
+          ./scripts/docker-env.sh ./scripts/build-linux.sh --release
+          ./scripts/docker-env.sh ./scripts/run-linux-tests.sh
+      - name: Check address safety, undefined behavior, and leaks
+        run: ./scripts/docker-env.sh env XSCOMIC_TEST_SANITIZER=address ./scripts/run-linux-tests.sh
+      - name: Check thread safety
+        run: ./scripts/docker-env.sh env XSCOMIC_TEST_SANITIZER=thread ./scripts/run-linux-tests.sh
+      - name: Check CLI, rendering, and file picker under Xvfb
+        run: ./scripts/docker-env.sh xvfb-run -a python3 Tests/xsComicLinuxTests/smoke.py build/linux/xscomic --x11

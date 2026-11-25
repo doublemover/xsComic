@@ -18,18 +18,16 @@ macOS Objective-C / AppKit / Metal application (`Sources/xsComic/`,
   `throws(XSCError *)`, `tryValue` / `tryOptional`, and `handle` / `catch`;
 - added `Sources/xsComicLinux/XSCArchive.{h,objc3}`: POSIX + `zlib` raw-DEFLATE
   + `libarchive` reader with zero-extraction `pread(2)` CBZ/ZIP (STORE,
-  raw-DEFLATE, Zip64, zip-bomb bounds) and CBT/TAR (ustar/PAX/GNU LongName),
-  in-process `libarchive` CBR/CB7 with 256 MiB spill directory cleanup, POSIX
-  `opendir`/`readdir` scanning with `O_NOFOLLOW`, ASCII-fast + UTF-8 natural
-  sorting (`qsort_r`), and adjacent-volume discovery;
+  raw-DEFLATE, Zip64, CRC-32 validation) and CBT/TAR (ustar/PAX/GNU LongName).
+  The libarchive reader caps temporary spill per book and across the process.
+  Directory books stay anchored to an open directory, with no-follow traversal,
+  natural sorting, and adjacent-volume discovery.
 - added `Sources/xsComicLinux/XSCImageStore.{h,objc3}`: native Linux decoders
   (`libjpeg-turbo`, `libpng`, `libwebp`, `giflib` with multi-frame composited
   animated GIFs, `libtiff`, `libavif`, `libheif`, built-in BMP), EXIF 1–8
-  orientation parsing, 32×32 chroma-probed 8-bit `L8` grayscale repacking (4×
-  RAM reduction), page-aligned anonymous `mmap` pixel buffers with
-  `madvise(MADV_FREE)` volatile marking, bounded 12-entry / 64 MiB LRU cache
-  with open-addressed hash table fast path, request coalescing, and 4-lane
-  priority pthread decode pool;
+  orientation parsing, straight-alpha TIFF output, and lossless 8-bit
+  grayscale repacking. A bounded 12-entry, 64 MiB cache uses page-owned pixel
+  mappings, request coalescing, and a four-lane priority decode pool.
 - added `Sources/xsComicLinux/XSCReaderModel.{h,objc3}`: archive-order
   single/two-page LTR/RTL navigation, 8-ahead/2-behind + 2-turn backward
   prefetch predictor, zero-hop synchronous cache-hit fast path, 120 ms loading
@@ -40,16 +38,15 @@ macOS Objective-C / AppKit / Metal application (`Sources/xsComic/`,
   `GL_R8` `.rrr1` shader, focal-point zoom, drag panning, in-place animated GIF
   playback, toolbar, collapsible page sidebar, empty CTA, direct Jump-to-Page
   modal (`Ctrl+Shift+G` / `G`), XDG-persisted settings popover (`prefs.ini`),
-  drag-and-drop, and deterministic `--screenshot` CLI PNG capture;
+  drag-and-drop, a cancellable file picker, and deterministic `--screenshot`
+  capture with distinct usage and rendering failure statuses.
 - added Debian 13 + pinned Slopjective-C SDK Docker toolchain
   (`docker/Dockerfile`, `scripts/docker-env.sh`), disjoint native-or-Docker
   Linux scripts (`scripts/build-linux.sh`, `scripts/run-linux-tests.sh`,
-  `scripts/build-and-run-linux.sh`) targeting `build/linux/xscomic` (never
-  colliding with macOS `build/product/xsComic.app`), a 183-assertion Linux test
-  and benchmark suite (`Tests/xsComicLinuxTests/main.objc3`), Linux
-  architecture documentation (`docs/linux.md`), and a reproducible audit record
-  (`Metrics/linux-objc3.json`);
-- verified Debian 13.8 `aarch64` release (`-Oz -flto=thin -Wl,--gc-sections
+  `scripts/build-and-run-linux.sh`) targeting `build/linux/xscomic`. Added
+  a core test and benchmark suite, sanitizer configurations, and rendered-image,
+  CLI, and file-picker tests in the x86-64 and AArch64 CI matrix.
+- Recorded the original port baseline (see `Metrics/linux-objc3.json`) on Debian 13.8 `aarch64` with release (`-Oz -flto=thin -Wl,--gc-sections
   -Wl,--as-needed` + `strip`) footprint, sanitizers, and benchmarks: **284.0 KiB
   (290,848 bytes)** stripped `build/linux/xscomic` (16 direct shared libraries,
   0 unused), `183 passed, 0 failed` (with ASan + UBSan + LSan and TSan 3/3

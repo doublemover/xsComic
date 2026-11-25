@@ -29,7 +29,7 @@ and even educational. (The RAM footprint could still use some work.)
 - Single-page and two-page spreads, left-to-right or right-to-left.
 - Keyboard navigation, focal-point zoom, drag panning, fit, and actual size.
 - Collapsible page sidebar, direct page jump (`Cmd+Shift+G` on macOS, `Ctrl+Shift+G` / `G` on Linux), and adjacent-volume continuation.
-- Zero-extraction `pread` archive reading, GPU Lanczos-3 downscaling with EXIF 1–8 orientation, 8-bit grayscale repacking, and purgeable page caching.
+- Zero-extraction `pread` archive reading, GPU Lanczos-3 downscaling with EXIF 1–8 orientation, 8-bit grayscale repacking, and bounded page caching.
 
 ## macOS
 
@@ -51,7 +51,7 @@ Native **Objective-C 3.0, SDL2, and OpenGL 3.3 Core** port (`Sources/xsComicLinu
 # Build the stripped release binary (build/linux/xscomic)
 ./scripts/build-linux.sh --release
 
-# Run the 183-assertion Linux test and benchmark suite
+# Run the Linux core test and benchmark suite
 ./scripts/run-linux-tests.sh
 
 # Build and launch (interactive X11/Wayland or headless --screenshot)
@@ -60,7 +60,11 @@ Native **Objective-C 3.0, SDL2, and OpenGL 3.3 Core** port (`Sources/xsComicLinu
 
 Compiles `.objc3` sources directly with `objc3c` (`-Oz -flto=thin -Wl,--gc-sections -Wl,--as-needed` + `strip`) against system Linux libraries (`zlib`, `libarchive`, `libjpeg-turbo`, `libpng`, `libwebp`, `giflib`, `libtiff`, `libavif`, `libheif`, `SDL2`, `SDL2_ttf`, OpenGL, `pthreads`). On Linux with `objc3c` (or `/opt/objc3c/activate.sh`) installed, all scripts run natively; on macOS or hosts without the SDK, they automatically build and delegate through [`scripts/docker-env.sh`](scripts/docker-env.sh) and [`docker/Dockerfile`](docker/Dockerfile).
 
-Measured on Debian 13 (`aarch64`, full record in [`Metrics/linux-objc3.json`](Metrics/linux-objc3.json)):
+[Linux CI](.github/workflows/linux.yml) builds the pinned SDK image on x86-64
+and AArch64 and runs core, sanitizer, and rendered-image checks.
+
+The original port's benchmark snapshot was recorded on Debian 13
+(`aarch64`). The [measurement record](Metrics/linux-objc3.json) includes the source digest.
 
 | Metric | Measured |
 | --- | --- |
