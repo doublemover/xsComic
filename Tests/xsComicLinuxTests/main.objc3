@@ -22,6 +22,10 @@
 #include <unistd.h>
 #include <zlib.h>
 
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#endif
+
 static int gPassCount = 0;
 static int gFailCount = 0;
 
@@ -41,6 +45,13 @@ static double nowMilliseconds(void) {
 }
 
 static uint64_t currentRssBytes(void) {
+#if defined(__APPLE__)
+    mach_task_basic_info_data_t info;
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    kern_return_t result = task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
+                                     (task_info_t)&info, &count);
+    return result == KERN_SUCCESS ? (uint64_t)info.resident_size : 0ULL;
+#else
     FILE *f = fopen("/proc/self/statm", "r");
     if (!f) return 0ULL;
     defer { fclose(f); }
@@ -52,6 +63,7 @@ static uint64_t currentRssBytes(void) {
     long pageSize = sysconf(_SC_PAGESIZE);
     if (pageSize <= 0) pageSize = 4096;
     return (uint64_t)rssPages * (uint64_t)pageSize;
+#endif
 }
 
 #pragma mark - Minimal Byte Buffer & File Helpers
@@ -727,10 +739,14 @@ static void testObjectiveC3Semantics(void) {
     printf("[TEST] Objective-C 3.0 Language & Runtime Semantics\n");
 
     // Compiler feature contract checks
+#if defined(__APPLE__)
+    XSC_ASSERT(__OBJC3__ == 1, "Objective-C 3 compilation is active");
+#else
     XSC_ASSERT(objc3_has_feature(OBJC3_FEATURE_DEFER) != 0, "objc3 defer feature enabled");
     XSC_ASSERT(objc3_has_feature(OBJC3_FEATURE_OPTIONALS) != 0, "objc3 optionals feature enabled");
     XSC_ASSERT(objc3_has_feature(OBJC3_FEATURE_RESULT) != 0, "objc3 result feature enabled");
     XSC_ASSERT(objc3_has_feature(OBJC3_FEATURE_THROWS) != 0, "objc3 throws feature enabled");
+#endif
 
     // 1. defer LIFO ordering + early return execution
     int order[3] = { 0, 0, 0 };
@@ -2596,9 +2612,9 @@ static void runBenchmarks(XSCString *tmpDir) {
     }
 
     uint64_t rss = currentRssBytes();
-    printf("  Process RSS (/proc/self/statm): %.2f MiB (%llu bytes)\n",
+    printf("  Process resident memory     : %.2f MiB (%llu bytes)\n",
            (double)rss / (1024.0 * 1024.0), (unsigned long long)rss);
-    XSC_ASSERT(rss > 0ULL, "Linux /proc/self/statm RSS readable");
+    XSC_ASSERT(rss > 0ULL, "process resident memory readable");
 }
 
 int main(void) {

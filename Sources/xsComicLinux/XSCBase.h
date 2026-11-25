@@ -1,6 +1,10 @@
 #pragma once
 
+#if defined(__APPLE__)
+#include <objc3_darwin.h>
+#else
 #include <objc/runtime.h>
+#endif
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -17,13 +21,16 @@
 #if defined(__has_include) && __has_include(<objc3/errors.h>)
 #include <objc3/errors.h>
 #else
+#if defined(__APPLE__)
+__attribute__((objc_non_runtime_protocol))
+#endif
 @protocol Error
 @end
 #endif
 
 /*
  XSCBase provides a tiny, zero-bloat Objective-C 3.0 foundation layer on top of
- libobjc2 (GNUstep 2.2 ABI) + POSIX pthreads. Avoiding GNUstep-Base keeps the
+ the platform's owned Objective-C runtime and POSIX pthreads. Avoiding GNUstep-Base keeps the
  executable small, launch time fast, and memory ownership explicit.
  */
 

@@ -21,6 +21,9 @@ typedef enum XSCPageTurnKey {
 
 @class XSCReaderModel;
 
+#if defined(__APPLE__)
+__attribute__((objc_non_runtime_protocol))
+#endif
 @protocol XSCReaderModelDelegate
 - (void)readerModelDidUpdateState:(XSCReaderModel *)model;
 - (void)readerModel:(XSCReaderModel *)model

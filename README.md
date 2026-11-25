@@ -66,8 +66,19 @@ ThreadSanitizer run instruments both the app and the release's libobjc2 sources
 with the pinned SDK, then uses its `llvm-symbolizer` for source locations.
 
 [macOS CI](.github/workflows/macos.yml) builds the native AppKit app on Apple Silicon
-and runs its reader tests in parallel. The ObjC3 port depends on expanded Darwin
-compiler and runtime support. [Slopjective-C #8340](https://github.com/doublemover/Slopjective-C/issues/8340)
+and runs its reader tests in parallel. The Objective-C 3 core also has a native
+qualification entry point for the experimental Darwin SDK. Use the Xcode
+version required by the installed SDK and install the codec dependencies.
+[Slopjective-C #8340](https://github.com/doublemover/Slopjective-C/issues/8340)
+
+```sh
+brew install pkg-config libarchive jpeg-turbo libpng webp libtiff libavif libheif giflib
+XSCOMIC_OBJC3_SDK="/path/to/installed/Darwin SDK" ./scripts/run-objc3-macos-tests.sh
+```
+
+The script builds the same core sources and test suite on Apple Silicon.
+Build logs, SDK identity, library paths, and results are saved under
+`build/objc3-macos-tests/`.
 
 The original port's benchmark snapshot was recorded on Debian 13
 (`aarch64`). The [measurement record](Metrics/linux-objc3.json) includes the source digest.

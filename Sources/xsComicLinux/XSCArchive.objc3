@@ -676,7 +676,30 @@ static bool xscPayloadListAppend(XSCPayloadList *list, uint8_t *bytes, size_t le
     return true;
 }
 
-// glibc qsort_r comparator: thunk is the THIRD argument.
+typedef int (*XSCCompareWithContext)(const void *, const void *, void *);
+
+#if defined(__APPLE__)
+typedef struct {
+    XSCCompareWithContext compare;
+    void *context;
+} XSCSortContext;
+
+static int xscCompareDarwin(void *context, const void *lhs, const void *rhs) {
+    const XSCSortContext *sort = context;
+    return sort->compare(lhs, rhs, sort->context);
+}
+#endif
+
+static void xscSortWithContext(void *items, size_t count, size_t size,
+                               XSCCompareWithContext compare, void *context) {
+#if defined(__APPLE__)
+    XSCSortContext sort = { compare, context };
+    qsort_r(items, count, size, &sort, xscCompareDarwin);
+#else
+    qsort_r(items, count, size, compare, context);
+#endif
+}
+
 static int xscCompareEntries(const void *lhsPtr, const void *rhsPtr, void *thunk) {
     const XSCByteArena *arena = (const XSCByteArena *)thunk;
     const XSCEntry *a = (const XSCEntry *)lhsPtr;
@@ -1441,7 +1464,7 @@ static int xscCompareSiblings(const void *lhsPtr, const void *rhsPtr, void *thun
         throwError(err);
     }
 
-    qsort_r(list.items, list.count, sizeof(XSCEntry), xscCompareEntries, &arena);
+    xscSortWithContext(list.items, list.count, sizeof(XSCEntry), xscCompareEntries, &arena);
 
     if (xscIsCancelled(cancelFlag)) {
         XSCError *err = xscMakeError(XSCArchiveErrorCancelled, "Cancelled.");
@@ -1736,7 +1759,7 @@ static int xscCompareSiblings(const void *lhsPtr, const void *rhsPtr, void *thun
         throwError(err);
     }
 
-    qsort_r(list.items, list.count, sizeof(XSCEntry), xscCompareEntries, &arena);
+    xscSortWithContext(list.items, list.count, sizeof(XSCEntry), xscCompareEntries, &arena);
 
     XSCBook *book = [[XSCBook alloc] initWithSourcePath:sourcePath
                                                    kind:XSCBookKindZip
@@ -1961,7 +1984,7 @@ static int xscCompareSiblings(const void *lhsPtr, const void *rhsPtr, void *thun
         throwError(err);
     }
 
-    qsort_r(list.items, list.count, sizeof(XSCEntry), xscCompareEntries, &arena);
+    xscSortWithContext(list.items, list.count, sizeof(XSCEntry), xscCompareEntries, &arena);
 
     XSCBook *book = [[XSCBook alloc] initWithSourcePath:sourcePath
                                                    kind:XSCBookKindTar
@@ -2266,7 +2289,7 @@ static int xscCompareSiblings(const void *lhsPtr, const void *rhsPtr, void *thun
         throwError(err);
     }
 
-    qsort_r(list.items, list.count, sizeof(XSCEntry), xscCompareEntries, &arena);
+    xscSortWithContext(list.items, list.count, sizeof(XSCEntry), xscCompareEntries, &arena);
 
     XSCBook *book = [[XSCBook alloc] initWithSourcePath:sourcePath
                                                    kind:XSCBookKindLibarchive
@@ -2379,7 +2402,7 @@ static int xscCompareSiblings(const void *lhsPtr, const void *rhsPtr, void *thun
         return None(XSCString *);
     }
 
-    qsort_r(items, count, sizeof(XSCSiblingEntry), xscCompareSiblings, &arena);
+    xscSortWithContext(items, count, sizeof(XSCSiblingEntry), xscCompareSiblings, &arena);
 
     ssize_t currentIndex = -1;
     for (size_t i = 0u; i < count; i++) {
