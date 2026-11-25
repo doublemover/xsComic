@@ -41,7 +41,7 @@ Objective-C 3.0 throughout:
 
 # Run the core suite with sanitizers
 XSCOMIC_TEST_SANITIZER=address ./scripts/run-linux-tests.sh
-XSCOMIC_TEST_SANITIZER=thread ./scripts/run-linux-tests.sh
+./scripts/docker-env.sh env XSCOMIC_TEST_SANITIZER=thread ./scripts/run-linux-tests.sh
 
 # Check the built release with Mesa, Xvfb, and ordinary synthetic comic pages
 xvfb-run -a python3 Tests/xsComicLinuxTests/smoke.py build/linux/xscomic --x11
@@ -59,6 +59,10 @@ preferences to `build/docker-config/`. Build inputs and outputs specified by
 `CBR_SCRATCH_PATH` and `CBR_OUTPUT_DIR` live under the checkout when Docker
 performs the build. Native builds also accept paths outside the checkout.
 Sanitizer executables use separate directories under `build/`.
+The ThreadSanitizer run builds an instrumented `libobjc2` from the pinned
+release sources, checks that the test process loads it, and uses the SDK's
+`llvm-symbolizer`. A native run can instead set `XSCOMIC_TEST_THREAD_RUNTIME`
+to a matching instrumented library and `OBJC3C_SDK_ROOT` to the SDK.
 
 Docker mounts an explicitly supplied book outside the checkout read-only and
 mounts the requested screenshot output directory. Set

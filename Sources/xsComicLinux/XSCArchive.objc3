@@ -764,10 +764,7 @@ static XSCDataResult xscInflateRawDeflate(const uint8_t *compBuf,
     return Ok(XSCData *, XSCError *, data);
 }
 
-static XSCDataResult xscReadZipPage(int fd, uint64_t offset, XSCEntry entry) {
-    if (entry.compressionMethod == 0u) {
-        return xscReadRangeFromFD(fd, offset, entry.uncompressedSize, "Failed reading ZIP page.");
-    }
+static XSCDataResult xscReadZipDeflatePage(int fd, uint64_t offset, XSCEntry entry) {
     if (entry.compressionMethod != 8u) {
         return Err(XSCData *, XSCError *, xscMakeError(XSCArchiveErrorUnsupportedFormat, "Unsupported ZIP compression method."));
     }
@@ -2495,7 +2492,12 @@ static int xscCompareSiblings(const void *lhsPtr, const void *rhsPtr, void *thun
                 throwError(err);
             }
 
-            XSCDataResult res = xscReadZipPage(_fd, payloadOff, e);
+            XSCDataResult res;
+            if (e.compressionMethod == 0u) {
+                res = xscReadRangeFromFD(_fd, payloadOff, e.uncompressedSize, "Failed reading ZIP page.");
+            } else {
+                res = xscReadZipDeflatePage(_fd, payloadOff, e);
+            }
             match (res) {
                 case .Ok(let data): {
                     if (crc32_z(0u, data.bytes, data.length) != e.zipCRC32) {
