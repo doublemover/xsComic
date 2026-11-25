@@ -2,36 +2,32 @@
 
 ## 2.0.0
 
-Full Apple Silicon (arm64) rewrite in pure Objective-C + AppKit + Metal with
-zero third-party dependencies (requires macOS 14+ on Apple Silicon):
+Apple Silicon (`arm64`, macOS 14+) rewrite in Objective-C, AppKit, and Metal:
 
-- **Native Objective-C + AppKit shell**: dropped SwiftUI, Swift Concurrency, and
-  Swift runtime linkage for direct `NSApplication` / `NSWindowController` /
-  `NSToolbar` / `NSTableView` UI, cutting the signed arm64 binary to ~156 KB
-  (from 283 KB) and the complete `.app` bundle to ~200 KB (from 511 KB; `.tar.xz`
-  ~80 KB, `.zip` ~96 KB);
-- **Direct Metal rendering (`CAMetalLayer`)**: zero-copy `IOSurface` →
-  `MTLTexture` binding with inline MSL Lanczos-3 downscaling, EXIF 1–8
-  orientation, 120 Hz focal-point pinch-zoom, smooth panning, and native
-  `NSImageView` fallback for multi-frame animated GIFs;
-- **Purgeable unified-memory image cache**: off-screen cached pages are marked
-  `kIOSurfacePurgeableVolatile` (zero dirty RAM footprint under pressure), with
-  automatic RGB-grayscale detection and `vImage` 8-bit `'L008'` repacking (4×
-  less RAM on grayscale manga), hardware `CGImageSourceCreateImageAtIndex`
-  decoding, and a lock-protected synchronous cache-hit fast path (<0.2 ms
-  page turns);
-- **Zero-extraction archive I/O**: direct `pread` random-access CBZ/ZIP (STORE,
-  DEFLATE via `libcompression`, Zip64) and CBT/tar with zero temp-file writes,
-  in-process `libarchive` for CBR/RAR and CB7/7z, and POSIX `opendir`/`readdir`
-  with zero-allocation ASCII-fast natural sorting;
-- **Predictive volume pre-warming & instant navigation**: pre-opens and
-  pre-decodes adjacent volumes within 3 pages of volume boundaries, preserves
-  the 8-ahead / 2-behind + 2-turn backward adaptive predictor, and uses a
-  120 ms loading grace timer to eliminate spinner flicker;
-- **Lean bundle & toolchain**: direct `clang -arch arm64 -Oz -flto` build,
-  single 32-color 512×512 `Assets.car` (32 KB), binary `Info.plist`, omitted
-  legacy `AppIcon.icns`, and a standalone Objective-C test & benchmark suite
-  (`./scripts/run-tests.sh`).
+- dropped SwiftUI, Swift Concurrency, and Swift runtime linkage for a direct
+  AppKit shell (`NSApplication`, `NSWindowController`, `NSToolbar`,
+  `NSTableView`), cutting the Developer ID signed executable to 174 KB, the
+  `.app` bundle to 218 KB, the stapled `.app.zip` to 101 KB, `.tar.xz` to 85 KB,
+  and the themed DMG to 223 KB;
+- replaced `NSImage`/SwiftUI rendering with `CAMetalLayer` and zero-copy
+  `IOSurface` textures, an inline MSL Lanczos-3 downscaler with EXIF 1–8
+  orientation, focal-point pinch zoom with no re-decodes on zoom/resize, and an
+  `NSImageView` overlay only for multi-frame GIFs;
+- switched off-screen cached pages to `kIOSurfacePurgeableVolatile`, added a
+  32×32 chroma probe that repacks RGB-encoded grayscale pages to 8-bit `'L008'`
+  via `vImage` (4× smaller), moved decoding to `CGImageSourceCreateImageAtIndex`,
+  and added an `os_unfair_lock` synchronous cache-hit fast path (~596 ns);
+- replaced upfront `bsdtar` extraction with `pread` random-access CBZ/ZIP
+  (STORE, DEFLATE via `libcompression`, Zip64) and CBT/tar (<0.15 ms open, zero
+  temp writes), in-process `/usr/lib/libarchive.2.dylib` for CBR/RAR and
+  CB7/7z, and POSIX `opendir`/`readdir` with a flat byte arena and ASCII-fast
+  natural sort (4,096 files in 1.83 ms);
+- added predictive adjacent-volume pre-warming within 3 pages of volume
+  boundaries and a 120 ms loading grace timer to prevent spinner flicker;
+- replaced SwiftPM with direct `clang -arch arm64 -Oz -flto`, a single
+  32-color 512×512 `Assets.car` (32 KB), binary `Info.plist`, and a 63-test
+  Objective-C test/benchmark runner (`./scripts/run-tests.sh`).
+- dropped Intel (`x86_64`) support; Intel Macs can stay on v1.0.0.
 
 ## 1.0.0
 

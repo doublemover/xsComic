@@ -25,48 +25,30 @@ and even educational. (The RAM footprint could still use some work.)
 
 ## What it does
 
-- opens CB7/7z, CBR/RAR, CBT/tar, CBZ/ZIP, and image directories
-- reads one or two pages at a time, left-to-right or right-to-left
-- offers keyboard controls, pinch-and-drag zooming, fit, and actual size
-- includes a page sidebar, direct page jump, and adjacent-volume continuation
-- prepares the pages you are most likely to turn to next
+- Reads CB7/7z, CBR/RAR, CBT/tar, CBZ/ZIP, and image folders.
+- Single-page and two-page spreads, left-to-right or right-to-left.
+- Keyboard navigation, focal-point pinch zoom, drag panning, fit, and actual size.
+- Page sidebar, direct page jump (`Cmd+Shift+G`), and adjacent-volume continuation.
+- Zero-extraction archive reading, Metal Lanczos-3 scaling, and purgeable `IOSurface` page caching.
 
-The minimum supported system is macOS 14 on Apple Silicon (`arm64`).
+Requires macOS 14+ on Apple Silicon (`arm64`). Intel users can use [v1.0.0](https://github.com/linusmixson/xsComic/releases/tag/v1.0.0).
 
-## Give it a try
-
-Build and open xsComic:
+## Build and test
 
 ```sh
 ./scripts/build-and-run.sh
-```
-
-Run the standalone Objective-C test and benchmark suite:
-
-```sh
 ./scripts/run-tests.sh
 ```
 
-That is the whole getting-started procedure. The build compiles directly with
-Apple's `clang` against system frameworks (`AppKit`, `Metal`, `ImageIO`,
-`IOSurface`, `Accelerate`, `libcompression`, `libarchive`); there is no Xcode
-project or third-party dependency installation.
+Compiles directly with `clang` against macOS system frameworks and libraries (`AppKit`, `Metal`, `ImageIO`, `IOSurface`, `Accelerate`, `libcompression`, `libarchive`). No Xcode project, no third-party dependencies.
 
-## If you are curious
+## Docs
 
-The more technical material lives in [`docs/`](docs/):
-
-- [the project guide](docs/guide.md) explains the features, architecture, and
-  codebase;
-- [the optimization record](docs/optimization.md) keeps the before-and-after
-  measurements and the reasoning behind them;
-- [the release procedure](docs/releasing.md) covers tests, packaging, signing,
-  and notarization;
-- [the raw metrics](Metrics/) preserve the machine-readable evidence.
+- [`docs/guide.md`](docs/guide.md) — architecture, I/O, rendering, and cache invariants
+- [`docs/optimization.md`](docs/optimization.md) — historical 1.0 optimization record and measurements
+- [`docs/releasing.md`](docs/releasing.md) — packaging, signing, notarization, and DMG builds
+- [`Metrics/`](Metrics/) — raw measurement records
 
 ## License
 
-The software is **AGPL-3.0-or-later**. Documentation and measurements are
-**CC BY-SA 4.0**. The xsComic name and everything under `Assets/` are expressly
-excluded: no license is granted for the branding or character artwork. The
-short, unambiguous map is in [`LICENSING.md`](LICENSING.md).
+Code is **AGPL-3.0-or-later**. Docs and measurements are **CC BY-SA 4.0**. The xsComic name and everything under `Assets/` are excluded; see [`LICENSING.md`](LICENSING.md).
