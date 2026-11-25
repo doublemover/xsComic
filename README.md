@@ -31,7 +31,7 @@ and even educational. (The RAM footprint could still use some work.)
 - includes a page sidebar, direct page jump, and adjacent-volume continuation
 - prepares the pages you are most likely to turn to next
 
-The minimum supported system is macOS 14.
+The minimum supported system is macOS 14 on Apple Silicon (`arm64`).
 
 ## Give it a try
 
@@ -41,8 +41,16 @@ Build and open xsComic:
 ./scripts/build-and-run.sh
 ```
 
-That is the whole getting-started procedure. The build uses SwiftPM and Apple's
-developer tools; there is no Xcode project or dependency installation.
+Run the standalone Objective-C test and benchmark suite:
+
+```sh
+./scripts/run-tests.sh
+```
+
+That is the whole getting-started procedure. The build compiles directly with
+Apple's `clang` against system frameworks (`AppKit`, `Metal`, `ImageIO`,
+`IOSurface`, `Accelerate`, `libcompression`, `libarchive`); there is no Xcode
+project or third-party dependency installation.
 
 ## If you are curious
 

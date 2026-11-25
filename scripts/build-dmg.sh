@@ -1,31 +1,31 @@
 #!/bin/zsh
 set -euo pipefail
 
-# Turn one already-built release app into the familiar macOS installation
+# Turn one already-built arm64 release app into the familiar macOS installation
 # window: app on the left, /Applications on the right, legal notices below.
 # The writable image exists only long enough for Finder to write .DS_Store;
 # the published image is read-only LZFSE, the compact native macOS format.
 ROOT=${0:A:h:h}
 VERSION=$(<"$ROOT/VERSION")
-case ${1:-} in
-    x86_64)
-        PRODUCT="$ROOT/build/product"
-        VOLUME="xsComic $VERSION — Intel"
-        ;;
+ARCHITECTURE=${1:-arm64}
+case "$ARCHITECTURE" in
     arm64)
-        PRODUCT="$ROOT/build/product-arm64"
-        VOLUME="xsComic $VERSION — Apple Silicon"
+        PRODUCT=${CBR_OUTPUT_DIR:-"$ROOT/build/product"}
+        PRODUCT=${PRODUCT:A}
+        VOLUME="xsComic $VERSION"
         ;;
     *)
-        echo "usage: $0 <x86_64|arm64>" >&2
+        echo "usage: $0 [arm64]" >&2
+        echo "xsComic 2.0+ ships for Apple Silicon (arm64) only." >&2
         exit 2
         ;;
 esac
-ARCHITECTURE=$1
+
 APP="$PRODUCT/xsComic.app"
 BINARY="$APP/Contents/MacOS/ComicBookReader"
 OUTPUT="$PRODUCT/xsComic-$VERSION-$ARCHITECTURE.dmg"
 BACKGROUND="$ROOT/Assets/Brand/xsComic-dmg-background.jpg"
+VOLUME_ICON="$ROOT/Assets/AppIcon.icns"
 SIGN_IDENTITY=${CBR_SIGN_IDENTITY:--}
 
 for required in "$APP" "$BINARY" "$BACKGROUND" "$ROOT/LICENSE" \
@@ -37,7 +37,7 @@ do
     fi
 done
 if [[ "$(lipo -archs "$BINARY")" != "$ARCHITECTURE" ]]; then
-    echo "App architecture does not match requested DMG: $BINARY" >&2
+    echo "App architecture does not match requested DMG ($ARCHITECTURE): $BINARY" >&2
     exit 1
 fi
 codesign --verify --strict "$APP"
@@ -62,16 +62,20 @@ cp "$BACKGROUND" "$STAGE/.background/background.jpg"
 cp "$ROOT/LICENSE" "$STAGE/Licenses/AGPL-3.0.txt"
 cp "$ROOT/LICENSING.md" "$STAGE/Licenses/LICENSING.md"
 cp "$ROOT/LICENSES/BRANDING.md" "$STAGE/Licenses/BRANDING.md"
-cp "$ROOT/Assets/AppIcon.icns" "$STAGE/.VolumeIcon.icns"
-chmod 644 "$STAGE/.background/background.jpg" "$STAGE/Licenses/"* \
-    "$STAGE/.VolumeIcon.icns"
+chmod 644 "$STAGE/.background/background.jpg" "$STAGE/Licenses/"*
+if [[ -f "$VOLUME_ICON" ]]; then
+    cp "$VOLUME_ICON" "$STAGE/.VolumeIcon.icns"
+    chmod 644 "$STAGE/.VolumeIcon.icns"
+fi
 
 hdiutil create -quiet -fs HFS+ -format UDRW -volname "$VOLUME" \
     -srcfolder "$STAGE" "$WRITABLE"
 hdiutil attach -quiet -readwrite -noverify -noautoopen \
     -mountpoint "$MOUNT" "$WRITABLE"
 MOUNTED=true
-/usr/bin/SetFile -a C "$MOUNT"
+if [[ -f "$VOLUME_ICON" ]]; then
+    /usr/bin/SetFile -a C "$MOUNT"
+fi
 osascript "$ROOT/scripts/layout-dmg.applescript" "$MOUNT"
 
 # Finder has finished writing the one metadata file we want: .DS_Store. Remove

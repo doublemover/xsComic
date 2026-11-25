@@ -129,29 +129,19 @@ JSON
     echo "$output"
 
     if [[ -n "$modern_output" ]]; then
-        # Tahoe distinguishes an app-icon asset from a legacy picture. Without
-        # this catalog it places the full square ICNS inside another rounded
-        # plate. Its decoder expects RGBA planes, unlike the palette-compressed
-        # large planes retained above solely to minimize the fallback ICNS.
+        # macOS 14+ resolves CFBundleIconName from Assets.car and applies the
+        # native rounded plate. A single 32-color 512x512 (256x256@2x) rendition
+        # compiled with --optimization space keeps Assets.car at ~32 KB (~18 KB xz)
+        # while rendering crisply at full 512x512 via NSWorkspace/Finder/Dock.
         mkdir -p "$modern_set"
         cp "$catalog/Contents.json" "$modern_catalog/Contents.json"
-        for file in "$iconset"/*.png; do
-            magick "$file" -define png:compression-level=9 \
-                "PNG32:$modern_set/${file:t}"
-        done
+        magick -background none "$source" -resize 512x512 \
+            -depth 8 -strip -colors 32 \
+            "PNG32:$modern_set/icon_256x256@2x.png"
         cat > "$modern_set/Contents.json" <<'JSON'
 {
   "images": [
-    {"filename":"icon_16x16.png","idiom":"mac","scale":"1x","size":"16x16"},
-    {"filename":"icon_16x16@2x.png","idiom":"mac","scale":"2x","size":"16x16"},
-    {"filename":"icon_32x32.png","idiom":"mac","scale":"1x","size":"32x32"},
-    {"filename":"icon_32x32@2x.png","idiom":"mac","scale":"2x","size":"32x32"},
-    {"filename":"icon_128x128.png","idiom":"mac","scale":"1x","size":"128x128"},
-    {"filename":"icon_128x128@2x.png","idiom":"mac","scale":"2x","size":"128x128"},
-    {"filename":"icon_256x256.png","idiom":"mac","scale":"1x","size":"256x256"},
-    {"filename":"icon_256x256@2x.png","idiom":"mac","scale":"2x","size":"256x256"},
-    {"filename":"icon_512x512.png","idiom":"mac","scale":"1x","size":"512x512"},
-    {"filename":"icon_512x512@2x.png","idiom":"mac","scale":"2x","size":"512x512"}
+    {"filename":"icon_256x256@2x.png","idiom":"mac","scale":"2x","size":"256x256"}
   ],
   "info":{"author":"xsComic","version":1}
 }
@@ -162,6 +152,7 @@ JSON
             --platform macosx \
             --target-device mac \
             --minimum-deployment-target 14.0 \
+            --optimization space \
             --app-icon AppIcon \
             --output-partial-info-plist "$STAGE/modern-info.plist" \
             --warnings --notices >/dev/null
