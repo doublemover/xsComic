@@ -29,7 +29,7 @@ and even educational. (The RAM footprint could still use some work.)
 - Single-page and two-page spreads, left-to-right or right-to-left.
 - Keyboard navigation, focal-point zoom, drag panning, fit, and actual size.
 - Collapsible page sidebar, direct page jump (`Cmd+Shift+G` on macOS, `Ctrl+Shift+G` / `G` on Linux), and adjacent-volume continuation.
-- Zero-extraction `pread` archive reading, GPU Lanczos-3 downscaling with EXIF 1–8 orientation, 8-bit grayscale repacking, and bounded page caching.
+- Zero-extraction `pread` archive reading, GPU downscaling with EXIF 1–8 orientation, 8-bit grayscale repacking, and bounded page caching.
 
 ## macOS
 
@@ -62,6 +62,10 @@ Compiles `.objc3` sources directly with `objc3c` (`-Oz -flto=thin -Wl,--gc-secti
 
 [Linux CI](.github/workflows/linux.yml) builds the pinned SDK image on x86-64
 and AArch64 and runs core, sanitizer, and rendered-image checks.
+
+[macOS CI](.github/workflows/macos.yml) builds the native AppKit app on Apple Silicon
+and runs its reader tests in parallel. The ObjC3 port depends on expanded Darwin
+compiler and runtime support. [Slopjective-C #8340](https://github.com/doublemover/Slopjective-C/issues/8340)
 
 The original port's benchmark snapshot was recorded on Debian 13
 (`aarch64`). The [measurement record](Metrics/linux-objc3.json) includes the source digest.

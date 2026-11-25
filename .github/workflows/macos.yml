@@ -1,0 +1,72 @@
+name: macOS native app
+
+on:
+  pull_request:
+    branches: [master, port_slopjective_c]
+  push:
+    branches: [master, port_slopjective_c]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: macOS arm64 ${{ matrix.check }}
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - check: release bundle
+            bundle: release
+          - check: debug bundle
+            bundle: debug
+          - check: core tests
+            bundle: ''
+            sanitizer: ''
+          - check: ASan and UBSan
+            bundle: ''
+            sanitizer: address
+          - check: ThreadSanitizer
+            bundle: ''
+            sanitizer: thread
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and verify native app bundle
+        if: matrix.bundle != ''
+        env:
+          CONFIGURATION: ${{ matrix.bundle }}
+        run: |
+          set -o pipefail
+          mkdir -p build/ci
+          app=build/product/xsComic.app
+          {
+            if [[ "$CONFIGURATION" == debug ]]; then
+              ./scripts/build-app.sh --debug
+            else
+              ./scripts/build-app.sh
+            fi &&
+            plutil -lint "$app/Contents/Info.plist" &&
+            test "$(lipo -archs "$app/Contents/MacOS/ComicBookReader")" = arm64 &&
+            codesign --verify --deep --strict "$app"
+          } 2>&1 | tee build/ci/bundle.log
+      - name: Preserve the verified release app
+        if: matrix.bundle == 'release'
+        run: ditto -c -k --keepParent build/product/xsComic.app build/ci/xsComic-macos-arm64.zip
+      - name: Run native reader tests
+        if: matrix.bundle == ''
+        env:
+          XSCOMIC_TEST_SANITIZER: ${{ matrix.sanitizer }}
+        run: |
+          set -o pipefail
+          mkdir -p build/ci
+          ./scripts/run-tests.sh 2>&1 | tee build/ci/tests.log
+      - name: Preserve check logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64-${{ strategy.job-index }}
+          path: |
+            build/ci/*.log
+            build/ci/xsComic-macos-arm64.zip
