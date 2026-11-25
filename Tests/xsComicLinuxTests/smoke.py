@@ -10,7 +10,7 @@ from tempfile import TemporaryDirectory
 import time
 from zipfile import ZIP_DEFLATED, ZipFile
 
-from PIL import Image
+from PIL import Image, ImageChops, ImageGrab
 
 
 def image_bytes(image, format_name, **options):
@@ -89,6 +89,33 @@ def test_rendering(app, directory, env):
     alpha_tiff = make_comic(directory / "alpha-tiff.cbz", [("01.tiff", image_bytes(translucent, "TIFF"))])
     alpha_png = make_comic(directory / "alpha-png.cbz", [("01.png", image_bytes(translucent, "PNG"))])
     compare_samples(capture("alpha-tiff", alpha_tiff), capture("alpha-png", alpha_png), tolerance=2)
+
+    # Hidden RGB must not affect a filtered edge. Keep the visible pixels and
+    # alpha identical while changing the RGB of the fully transparent half.
+    def edge_book(name, hidden):
+        edge = Image.new("RGBA", (128, 96), (*hidden, 0))
+        edge.paste((220, 30, 20, 255), (0, 0, 64, 96))
+        return make_comic(directory / f"{name}.cbz", [("01.png", image_bytes(edge, "PNG"))])
+
+    clean = capture("alpha-edge-clean", edge_book("clean-edge", (0, 0, 0)))
+    hidden = capture("alpha-edge-hidden", edge_book("hidden-edge", (0, 255, 0)))
+    assert ImageChops.difference(clean, hidden).crop((300, 150, 500, 500)).getbbox() is None
+
+    checker = Image.new("L", (1024, 1024))
+    pixels = bytes((0, 255)) * 512 + bytes((255, 0)) * 512
+    checker.frombytes(pixels * 512)
+    checker_book = make_comic(directory / "checker.cbz", [("01.png", image_bytes(checker, "PNG"))])
+    filtered = capture("checker", checker_book, "--zoom=0.125").crop((375, 300, 425, 350))
+    assert all(126 <= channel <= 129 for color in filtered.getdata() for channel in color)
+
+    striped = Image.new("P", (128, 96))
+    striped.putpalette([240, 16, 32, 10, 120, 230])
+    striped.frombytes(b"".join(bytes([y % 7 == 0]) * 128 for y in range(96)))
+    interlaced = image_bytes(striped, "GIF", interlace=True)
+    gif_book = make_comic(directory / "interlaced.cbz", [("01.gif", interlaced)])
+    png_book = make_comic(directory / "interlace-reference.cbz", [("01.png", image_bytes(striped, "PNG"))])
+    assert ImageChops.difference(capture("interlaced", gif_book), capture("interlace-reference", png_book)) \
+        .crop((290, 170, 510, 480)).getbbox() is None
 
     sparse = Image.new("RGBA", (128, 128), (180, 180, 180, 255))
     sparse.paste((245, 5, 5, 255), (53, 53, 55, 55))
@@ -190,10 +217,60 @@ def test_picker(app, directory, env, book):
     print("Linux X11 file picker checks passed", flush=True)
 
 
+def test_interaction_and_animation(app, directory, env):
+    def solid(color):
+        return Image.new("RGB", (128, 96), color)
+
+    first = solid("red")
+    animated = image_bytes(first, "GIF", save_all=True, append_images=[solid("blue")], duration=[400, 200])
+    next_page = image_bytes(solid("lime"), "PNG")
+    book = make_comic(directory / "playback.cbz", [("01.gif", animated), ("02.png", next_page)])
+    env = {**env, "SDL_VIDEODRIVER": "x11"}
+
+    def xdotool(*args):
+        return subprocess.run(["xdotool", *args], env=env, check=True, capture_output=True, text=True).stdout
+
+    with subprocess.Popen([app, "--single", "--size=800x600", book], env=env) as reader:
+        try:
+            def find_window():
+                try:
+                    return xdotool("search", "--onlyvisible", "--pid", str(reader.pid)).splitlines()[0]
+                except (subprocess.CalledProcessError, IndexError):
+                    return None
+
+            window = wait_until(find_window, "animation window did not open")
+            xdotool("windowfocus", "--sync", window)
+            geometry = dict(line.split("=", 1) for line in xdotool("getwindowgeometry", "--shell", window).splitlines())
+            x, y = int(geometry["X"]) + 400, int(geometry["Y"]) + 320
+
+            def center_pixel():
+                return ImageGrab.grab(bbox=(x, y, x + 1, y + 1), xdisplay=env["DISPLAY"]).getpixel((0, 0))[:3]
+
+            wait_until(lambda: center_pixel() == (0, 0, 255), "GIF never reached its second frame")
+            # Sample over longer than the first frame. A GIF without a loop
+            # extension holds the last image after it finishes.
+            until = time.monotonic() + 0.7
+            while time.monotonic() < until:
+                assert center_pixel() == (0, 0, 255), "one-shot GIF restarted"
+                time.sleep(0.05)
+
+            xdotool("key", "g", "2", "Return")
+            wait_until(lambda: center_pixel() == (0, 255, 0), "jump-to-page failed")
+            xdotool("key", "g", "1", "Escape")
+            assert center_pixel() == (0, 255, 0), "cancelled jump changed the page"
+            xdotool("key", "ctrl+q")
+            assert reader.wait(timeout=5) == 0
+        finally:
+            if reader.poll() is None:
+                reader.kill()
+                reader.wait(timeout=5)
+    print("Linux X11 animation and navigation checks passed", flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("app", type=lambda value: Path(value).resolve())
-    parser.add_argument("--x11", action="store_true", help="exercise the X11 file picker too")
+    parser.add_argument("--x11", action="store_true", help="exercise X11 input, animation, and the file picker")
     args = parser.parse_args()
     with TemporaryDirectory(prefix="xscomic-smoke-") as temporary:
         directory = Path(temporary)
@@ -201,6 +278,7 @@ def main():
         book = test_rendering(args.app, directory, env)
         if args.x11:
             test_picker(args.app, directory, env, book)
+            test_interaction_and_animation(args.app, directory, env)
 
 
 if __name__ == "__main__":

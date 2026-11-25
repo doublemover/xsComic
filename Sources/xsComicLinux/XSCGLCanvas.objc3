@@ -6,11 +6,8 @@
       as `GL_R8` (1 byte/pixel) and expand `.rrr1` in the fragment shader; color
       pages upload as `GL_RGBA8` (4 bytes/pixel) with `GL_UNPACK_ROW_LENGTH`
       honoring page-aligned row strides.
-   2. Decode-once, GPU-scale-always: pages are decoded once at native resolution.
-      Resizing, sidebar toggles, and focal-point zoom never re-decode; the
-      fragment shader executes a 6x6 separable Lanczos-3 downscaling filter
-      when downscaling (`max(rt.x, rt.y) > 1.05`) and smooth linear sampling
-      when upscaling or 1:1.
+   2. Lazy mipmaps for large reductions and linear filtering at native size.
+      Associate alpha before filtering to keep hidden RGB out of page edges.
    3. Full EXIF 1..8 orientation transform in-shader and a 1 backing-pixel
       hairline page border without offscreen shadow surfaces.
    4. In-place multi-frame animated GIF frame playback via `tickAnimationAtMs:`.
@@ -20,17 +17,13 @@
 
 #include <SDL2/SDL.h>
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 static const float kXSCCanvasInset = 12.0f;
 static const float kXSCPageSpacing = 8.0f;
 static const float kXSCMinZoomScale = 0.1f;
 static const float kXSCMaxZoomScale = 16.0f;
-
-// Dark studio canvas backdrop (#141518)
-static const float kXSCCanvasBgR = 20.0f / 255.0f;
-static const float kXSCCanvasBgG = 21.0f / 255.0f;
-static const float kXSCCanvasBgB = 24.0f / 255.0f;
 
 bool xsc_gl_load_procs(XSCGLProcs *gl) {
     memset(gl, 0, sizeof(*gl));
@@ -56,6 +49,7 @@ bool xsc_gl_load_procs(XSCGLProcs *gl) {
     gl->uniform2f          = (PFNGLUNIFORM2FPROC)SDL_GL_GetProcAddress("glUniform2f");
     gl->uniform4f          = (PFNGLUNIFORM4FPROC)SDL_GL_GetProcAddress("glUniform4f");
     gl->activeTexture      = (PFNGLACTIVETEXTUREPROC)SDL_GL_GetProcAddress("glActiveTexture");
+    gl->generateMipmap     = (PFNGLGENERATEMIPMAPPROC)SDL_GL_GetProcAddress("glGenerateMipmap");
     gl->blendFuncSeparate  = (PFNGLBLENDFUNCSEPARATEPROC)SDL_GL_GetProcAddress("glBlendFuncSeparate");
 
     return gl->genVertexArrays && gl->deleteVertexArrays && gl->bindVertexArray
@@ -65,7 +59,7 @@ bool xsc_gl_load_procs(XSCGLProcs *gl) {
         && gl->getProgramiv && gl->getProgramInfoLog && gl->deleteProgram
         && gl->useProgram && gl->getUniformLocation
         && gl->uniform1i && gl->uniform1f && gl->uniform2f && gl->uniform4f
-        && gl->activeTexture;
+        && gl->activeTexture && gl->generateMipmap;
 }
 
 static XSCDecodedPage *xsc_unwrap_page(XSCOptDecodedPage opt) {
@@ -82,20 +76,13 @@ static XSCString *xsc_unwrap_string(XSCOptString opt) {
     }
 }
 
-static uint32_t xsc_effective_gif_delay_ms(uint32_t rawDelayMs) {
-    if (rawDelayMs == 0u) return 100u;
-    if (rawDelayMs < 16u) return 16u;
-    return rawDelayMs;
-}
-
 /*
- Inline OpenGL 3.3 Core shaders — 1:1 port of XSCMetalCanvas.m's inline MSL:
+ Inline OpenGL 3.3 Core page shaders:
    - Vertex shader emits 6 vertices via gl_VertexID using an empty VAO.
      uv=(0,0) maps to top-left (uRect.x, uRect.w) and uv=(1,1) to bottom-right
      (uRect.z, uRect.y), matching row-0-top decoded pixel memory layout.
-   - Fragment shader applies EXIF 1..8 orientation transform, 6x6 separable
-     Lanczos-3 downscaling when max(rt.x, rt.y) > 1.05, .rrr1 grayscale
-     swizzling for GL_R8 textures, and a 1 backing-pixel hairline border.
+   - Fragment shader applies EXIF orientation, expands single-channel manga
+     pages, and draws a one-pixel inner border.
  */
 static const char * const kXSCPageVertexShader =
     "#version 330 core\n"
@@ -116,7 +103,6 @@ static const char * const kXSCPageFragmentShader =
     "in vec2 vUV;\n"
     "out vec4 fragColor;\n"
     "uniform sampler2D uTex;\n"
-    "uniform vec2 uTexSize;\n"
     "uniform vec2 uDstSize;\n"
     "uniform int uOrientation;\n"
     "uniform int uIsGrayscale;\n"
@@ -132,41 +118,8 @@ static const char * const kXSCPageFragmentShader =
     "    return u;\n"
     "}\n"
     "\n"
-    "float l3(float x) {\n"
-    "    float a = abs(x);\n"
-    "    if (a < 1e-4) return 1.0;\n"
-    "    if (a >= 3.0) return 0.0;\n"
-    "    float p = 3.14159265 * a;\n"
-    "    float q = p / 3.0;\n"
-    "    return (sin(p) * sin(q)) / (p * q);\n"
-    "}\n"
-    "\n"
     "void main() {\n"
-    "    vec2 ru = ex(vUV, uOrientation);\n"
-    "    vec2 ot = (uOrientation >= 5 && uOrientation <= 8) ? uTexSize.yx : uTexSize;\n"
-    "    vec2 rt = ot / max(uDstSize, vec2(1.0));\n"
-    "    vec4 c;\n"
-    "    if (max(rt.x, rt.y) > 1.05) {\n"
-    "        vec2 tx = 1.0 / max(uTexSize, vec2(1.0));\n"
-    "        vec2 rr = (uOrientation >= 5 && uOrientation <= 8) ? rt.yx : rt;\n"
-    "        vec2 st = tx * clamp(rr * 0.5, vec2(1.0), vec2(3.5));\n"
-    "        vec2 co = ru * uTexSize - 0.5;\n"
-    "        vec2 f = fract(co);\n"
-    "        vec2 b = (floor(co) + 0.5) * tx;\n"
-    "        vec4 a = vec4(0.0);\n"
-    "        float ws = 0.0;\n"
-    "        for (int j = -2; j <= 3; ++j) {\n"
-    "            float wy = l3(float(j) - f.y);\n"
-    "            for (int i = -2; i <= 3; ++i) {\n"
-    "                float w = l3(float(i) - f.x) * wy;\n"
-    "                a += texture(uTex, b + vec2(float(i), float(j)) * st) * w;\n"
-    "                ws += w;\n"
-    "            }\n"
-    "        }\n"
-    "        c = clamp(a / max(ws, 1e-5), 0.0, 1.0);\n"
-    "    } else {\n"
-    "        c = texture(uTex, ru);\n"
-    "    }\n"
+    "    vec4 c = texture(uTex, ex(vUV, uOrientation));\n"
     "    if (uIsGrayscale != 0) {\n"
     "        c = vec4(c.r, c.r, c.r, 1.0);\n"
     "    }\n"
@@ -181,7 +134,9 @@ typedef struct XSCPageSlot {
     GLuint texID;
     bool texDirty;
     bool texIsGrayscale;
+    bool mipmapsDirty;
     size_t gifFrame;
+    uint64_t gifStartMs;
     uint64_t gifNextMs;
 } XSCPageSlot;
 
@@ -263,7 +218,6 @@ GLuint xsc_gl_build_program(const XSCGLProcs *gl,
 
     GLint _uRectLoc;
     GLint _uTexLoc;
-    GLint _uTexSizeLoc;
     GLint _uDstSizeLoc;
     GLint _uOrientationLoc;
     GLint _uIsGrayscaleLoc;
@@ -353,7 +307,6 @@ GLuint xsc_gl_build_program(const XSCGLProcs *gl,
     _vao = vao;
     _uRectLoc        = _gl.getUniformLocation(_program, "uRect");
     _uTexLoc         = _gl.getUniformLocation(_program, "uTex");
-    _uTexSizeLoc     = _gl.getUniformLocation(_program, "uTexSize");
     _uDstSizeLoc     = _gl.getUniformLocation(_program, "uDstSize");
     _uOrientationLoc = _gl.getUniformLocation(_program, "uOrientation");
     _uIsGrayscaleLoc = _gl.getUniformLocation(_program, "uIsGrayscale");
@@ -392,11 +345,42 @@ GLuint xsc_gl_build_program(const XSCGLProcs *gl,
     if (slot->texID != 0u && _glReady) {
         glDeleteTextures(1, &slot->texID);
     }
-    slot->texID = 0u;
-    slot->texDirty = false;
-    slot->texIsGrayscale = false;
-    slot->gifFrame = 0u;
-    slot->gifNextMs = 0ULL;
+    *slot = (XSCPageSlot){ .gifNextMs = UINT64_MAX };
+}
+
+// Decoded pages retain straight RGBA for CPU clients. GIF pixels already have
+// either full alpha or all-zero channels. Only translucent static pages need
+// a temporary, associated-alpha upload buffer.
+static bool xsc_prepare_rgba_upload(const uint8_t *pixels, size_t width, size_t height,
+                                    size_t stride, uint8_t **output) {
+    *output = NULL;
+    for (size_t y = 0u; y < height; y++) {
+        const uint8_t *row = pixels + y * stride;
+        uint8_t allOpaque = 255u;
+        for (size_t x = 0u; x < width; x++) allOpaque &= row[x * 4u + 3u];
+        if (allOpaque == 255u) continue;
+
+        uint8_t *associated = (uint8_t *)malloc(width * height * 4u);
+        if (!associated) return false;
+        // The preceding rows were fully opaque.
+        for (size_t previous = 0u; previous < y; previous++) {
+            memcpy(associated + previous * width * 4u, pixels + previous * stride, width * 4u);
+        }
+        for (; y < height; y++) {
+            const uint8_t *src = pixels + y * stride;
+            uint8_t *dst = associated + y * width * 4u;
+            for (size_t x = 0u; x < width; x++, src += 4u, dst += 4u) {
+                unsigned alpha = src[3];
+                dst[0] = (uint8_t)((src[0] * alpha + 127u) / 255u);
+                dst[1] = (uint8_t)((src[1] * alpha + 127u) / 255u);
+                dst[2] = (uint8_t)((src[2] * alpha + 127u) / 255u);
+                dst[3] = src[3];
+            }
+        }
+        *output = associated;
+        break;
+    }
+    return true;
 }
 
 - (void)uploadSlot:(XSCPageSlot *)slot page:(XSCDecodedPage *)page {
@@ -404,41 +388,21 @@ GLuint xsc_gl_build_program(const XSCGLProcs *gl,
         slot->texDirty = (page != nil);
         return;
     }
-    if (slot->texID != 0u) {
-        glDeleteTextures(1, &slot->texID);
-        slot->texID = 0u;
-    }
-    slot->texDirty = false;
-    slot->gifFrame = 0u;
-    slot->gifNextMs = 0ULL;
+    [self releaseTextureForSlot:slot];
+    if (!page || page.pixelWidth == 0u || page.pixelHeight == 0u || !page.pixels) return;
 
-    if (!page || page.pixelWidth == 0u || page.pixelHeight == 0u) {
-        return;
-    }
-
-    const uint8_t *pixels = NULL;
+    const uint8_t *pixels = page.pixels;
     bool uploadGray = page.isGrayscale;
     size_t rowBytes = page.bytesPerRow;
-
-    if (page.isAnimatedGIF && page.gifFrameCount > 1u) {
-        uint32_t delayMs = 0u;
-        const uint8_t *frame0 = [page gifFramePixelsAtIndex:0u outDelayMs:&delayMs];
-        if (frame0) {
-            pixels = frame0;
-            uploadGray = false;
-            rowBytes = page.bytesPerRow;
-            slot->gifFrame = 0u;
-            slot->gifNextMs = (uint64_t)xsc_now_ms() + (uint64_t)xsc_effective_gif_delay_ms(delayMs);
-        }
-    }
-
-    if (!pixels) {
-        pixels = page.pixels;
-        uploadGray = page.isGrayscale;
-        rowBytes = page.bytesPerRow;
-    }
-    if (!pixels) {
+    uint8_t *associated = NULL;
+    defer { free(associated); }
+    if (!uploadGray && !page.isAnimatedGIF &&
+        !xsc_prepare_rgba_upload(pixels, page.pixelWidth, page.pixelHeight, rowBytes, &associated)) {
         return;
+    }
+    if (associated) {
+        pixels = associated;
+        rowBytes = page.pixelWidth * 4u;
     }
 
     GLuint tex = 0u;
@@ -478,32 +442,24 @@ GLuint xsc_gl_build_program(const XSCGLProcs *gl,
 
     slot->texID = tex;
     slot->texIsGrayscale = uploadGray;
+    slot->mipmapsDirty = true;
+    if (page.isAnimatedGIF) {
+        uint64_t next = UINT64_MAX;
+        slot->gifStartMs = (uint64_t)xsc_now_ms();
+        (void)[page gifFrameAtElapsedMs:0u nextChangeMs:&next];
+        if (next != UINT64_MAX) slot->gifNextMs = slot->gifStartMs + next;
+    }
 }
 
 - (bool)tickSlot:(XSCPageSlot *)slot page:(XSCDecodedPage *)page nowMs:(uint64_t)nowMs {
-    if (!_glReady || !page || !page.isAnimatedGIF || page.gifFrameCount <= 1u) {
+    if (!_glReady || !slot->texID || nowMs < slot->gifNextMs || slot->gifNextMs == UINT64_MAX) {
         return false;
     }
-    if (slot->texID == 0u || slot->texIsGrayscale) {
-        [self uploadSlot:slot page:page];
-        return slot->texID != 0u;
-    }
-    if (slot->gifNextMs == 0ULL || (slot->gifNextMs > nowMs && (slot->gifNextMs - nowMs) > 60000ULL)) {
-        uint32_t delayMs = 0u;
-        (void)[page gifFramePixelsAtIndex:slot->gifFrame outDelayMs:&delayMs];
-        slot->gifNextMs = nowMs + (uint64_t)xsc_effective_gif_delay_ms(delayMs);
-        return false;
-    }
-    if (nowMs < slot->gifNextMs) {
-        return false;
-    }
-
-    size_t nextFrame = (slot->gifFrame + 1u) % page.gifFrameCount;
-    uint32_t delayMs = 0u;
-    const uint8_t *framePixels = [page gifFramePixelsAtIndex:nextFrame outDelayMs:&delayMs];
-    if (!framePixels) {
-        return false;
-    }
+    uint64_t next = UINT64_MAX;
+    size_t nextFrame = [page gifFrameAtElapsedMs:nowMs - slot->gifStartMs nextChangeMs:&next];
+    slot->gifNextMs = next < UINT64_MAX - slot->gifStartMs ? slot->gifStartMs + next : UINT64_MAX;
+    if (nextFrame == slot->gifFrame) return false;
+    const uint8_t *framePixels = [page gifFramePixelsAtIndex:nextFrame outDelayMs:NULL];
 
     GLint rowLength = 0;
     if (page.bytesPerRow > page.pixelWidth * 4u && (page.bytesPerRow % 4u) == 0u) {
@@ -528,7 +484,8 @@ GLuint xsc_gl_build_program(const XSCGLProcs *gl,
                     framePixels);
 
     slot->gifFrame = nextFrame;
-    slot->gifNextMs = nowMs + (uint64_t)xsc_effective_gif_delay_ms(delayMs);
+    if (!slot->mipmapsDirty) glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    slot->mipmapsDirty = true;
     return true;
 }
 
@@ -536,6 +493,12 @@ GLuint xsc_gl_build_program(const XSCGLProcs *gl,
     bool leftChanged = [self tickSlot:&_leftSlot page:_leftPage nowMs:nowMs];
     bool rightChanged = [self tickSlot:&_rightSlot page:_rightPage nowMs:nowMs];
     return leftChanged || rightChanged;
+}
+
+- (uint64_t)nextAnimationDeadlineMs {
+    uint64_t left = _leftSlot.texID ? _leftSlot.gifNextMs : UINT64_MAX;
+    uint64_t right = _rightSlot.texID ? _rightSlot.gifNextMs : UINT64_MAX;
+    return left < right ? left : right;
 }
 
 #pragma mark - Public State & Layout API
@@ -559,6 +522,18 @@ GLuint xsc_gl_build_program(const XSCGLProcs *gl,
     XSCDecodedPage *leftPage = xsc_unwrap_page(leftPageOpt);
     XSCDecodedPage *rightPage = xsc_unwrap_page(rightPageOpt);
     XSCString *statusText = xsc_unwrap_string(statusTextOpt);
+
+    // Layout changes can move a page to the other slot. Carry its texture
+    // and playback clock along so a spread flip does not re-upload or restart.
+    if (_leftPage != leftPage && _rightPage != rightPage &&
+        ((leftPage && leftPage == _rightPage) || (rightPage && rightPage == _leftPage))) {
+        XSCPageSlot slot = _leftSlot;
+        _leftSlot = _rightSlot;
+        _rightSlot = slot;
+        XSCDecodedPage *page = _leftPage;
+        _leftPage = _rightPage;
+        _rightPage = page;
+    }
 
     if (_leftPage != leftPage) {
         _leftPage = leftPage;
@@ -758,7 +733,7 @@ GLuint xsc_gl_build_program(const XSCGLProcs *gl,
 #pragma mark - OpenGL Rendering
 
 - (void)drawQuadForPage:(XSCDecodedPage *)page
-                   slot:(const XSCPageSlot *)slot
+                   slot:(XSCPageSlot *)slot
                    rect:(XSCRectF)rect {
     if (!page || slot->texID == 0u || rect.width < 0.5f || rect.height < 0.5f) {
         return;
@@ -774,13 +749,19 @@ GLuint xsc_gl_build_program(const XSCGLProcs *gl,
     float ndcBottom = 1.0f - ((rect.y + rect.height) / _viewport.height) * 2.0f;
 
     _gl.uniform4f(_uRectLoc, ndcLeft, ndcBottom, ndcRight, ndcTop);
-    _gl.uniform2f(_uTexSizeLoc, (float)page.pixelWidth, (float)page.pixelHeight);
     _gl.uniform2f(_uDstSizeLoc, rect.width * _backingScale, rect.height * _backingScale);
     _gl.uniform1i(_uOrientationLoc, (GLint)page.exifOrientation);
     _gl.uniform1i(_uIsGrayscaleLoc, slot->texIsGrayscale ? 1 : 0);
 
     _gl.activeTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, slot->texID);
+    XSCSizeF pixels = page.orientedPixelSize;
+    if (slot->mipmapsDirty &&
+        (rect.width * _backingScale < pixels.width || rect.height * _backingScale < pixels.height)) {
+        _gl.generateMipmap(GL_TEXTURE_2D);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+        slot->mipmapsDirty = false;
+    }
     _gl.uniform1i(_uTexLoc, 0);
 
     glDrawArrays(GL_TRIANGLES, 0, 6);
@@ -816,11 +797,7 @@ GLuint xsc_gl_build_program(const XSCGLProcs *gl,
     glEnable(GL_SCISSOR_TEST);
     glDisable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
-    if (_gl.blendFuncSeparate) {
-        _gl.blendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-    } else {
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    }
+    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
     defer {
         glDisable(GL_SCISSOR_TEST);
         glBindTexture(GL_TEXTURE_2D, 0u);
@@ -830,8 +807,6 @@ GLuint xsc_gl_build_program(const XSCGLProcs *gl,
 
     glViewport(glX, glY, glW, glH);
     glScissor(glX, glY, glW, glH);
-    glClearColor(kXSCCanvasBgR, kXSCCanvasBgG, kXSCCanvasBgB, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT);
 
     if (!_leftPage && !_rightPage) {
         return;

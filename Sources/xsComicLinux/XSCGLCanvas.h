@@ -28,6 +28,7 @@ typedef struct XSCGLProcs {
     PFNGLUNIFORM2FPROC uniform2f;
     PFNGLUNIFORM4FPROC uniform4f;
     PFNGLACTIVETEXTUREPROC activeTexture;
+    PFNGLGENERATEMIPMAPPROC generateMipmap;
     PFNGLBLENDFUNCSEPARATEPROC blendFuncSeparate;
 } XSCGLProcs;
 
@@ -57,7 +58,7 @@ typedef void (^XSCZoomChangedBlock)(XSCZoomMode mode, float effectiveScale);
 
 /*
  XSCGLCanvas renders comic pages directly through OpenGL 3.3 Core with an
- inline GLSL Lanczos-3 downscaling shader, EXIF 1..8 orientation transform,
+ mipmapped minification, an EXIF 1..8 orientation transform,
  .rrr1 grayscale swizzling for GL_R8 manga textures, 1 px hairline page
  borders, focal-point zooming, drag panning, and multi-frame GIF playback.
  */
@@ -100,7 +101,10 @@ typedef void (^XSCZoomChangedBlock)(XSCZoomMode mode, float effectiveScale);
 /// Advances animated GIF frames if due; returns true if a texture changed and needs redraw.
 - (bool)tickAnimationAtMs:(uint64_t)nowMs;
 
-/// Renders the canvas background and visible page quads inside the active OpenGL context.
+/// Monotonic deadline for either visible GIF, or UINT64_MAX when neither is advancing.
+- (uint64_t)nextAnimationDeadlineMs;
+
+/// Renders the visible pages over the caller's cleared background.
 - (void)render;
 
 @end

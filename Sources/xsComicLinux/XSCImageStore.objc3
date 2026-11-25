@@ -224,7 +224,8 @@ static bool XSCMaybeRepackRGBAToGray8(XSCMmapBuffer *buf, size_t width, size_t h
     size_t _byteCount;
     bool _isAnimatedGIF;
     size_t _gifFrameCount;
-    uint32_t *_gifFrameDelaysMs;
+    uint32_t *_gifFrameEndsMs;
+    uint32_t _gifPlayCount;
     XSCData *_gifDataStorage;
 }
 
@@ -253,7 +254,8 @@ static bool XSCMaybeRepackRGBAToGray8(XSCMmapBuffer *buf, size_t width, size_t h
                          byteCount:(size_t)byteCount
                      isAnimatedGIF:(bool)isAnimatedGIF
                      gifFrameCount:(size_t)gifFrameCount
-                  gifFrameDelaysMs:(uint32_t *)gifFrameDelaysMs
+                  gifFrameEndsMs:(uint32_t *)gifFrameEndsMs
+                      gifPlayCount:(uint32_t)gifPlayCount
                            gifData:(XSCData *)gifData {
     self = [super init];
     if (self) {
@@ -268,7 +270,8 @@ static bool XSCMaybeRepackRGBAToGray8(XSCMmapBuffer *buf, size_t width, size_t h
         _byteCount = byteCount;
         _isAnimatedGIF = isAnimatedGIF;
         _gifFrameCount = gifFrameCount;
-        _gifFrameDelaysMs = gifFrameDelaysMs;
+        _gifFrameEndsMs = gifFrameEndsMs;
+        _gifPlayCount = gifPlayCount;
         _gifDataStorage = gifData;
     }
     return self;
@@ -280,8 +283,8 @@ static bool XSCMaybeRepackRGBAToGray8(XSCMmapBuffer *buf, size_t width, size_t h
         _pixelBuffer = NULL;
         _allocSize = 0u;
     }
-    free(_gifFrameDelaysMs);
-    _gifFrameDelaysMs = NULL;
+    free(_gifFrameEndsMs);
+    _gifFrameEndsMs = NULL;
 }
 
 - (XSCSizeF)orientedPixelSize {
@@ -300,9 +303,31 @@ static bool XSCMaybeRepackRGBAToGray8(XSCMmapBuffer *buf, size_t width, size_t h
     }
     size_t idx = frameIndex % _gifFrameCount;
     if (outDelayMs) {
-        *outDelayMs = _gifFrameDelaysMs ? _gifFrameDelaysMs[idx] : 100u;
+        *outDelayMs = _gifFrameEndsMs[idx] - (idx ? _gifFrameEndsMs[idx - 1u] : 0u);
     }
     return _pixelBuffer + idx * _frameByteSize;
+}
+
+- (size_t)gifFrameAtElapsedMs:(uint64_t)elapsed nextChangeMs:(uint64_t *)nextChange {
+    *nextChange = UINT64_MAX;
+    if (!_isAnimatedGIF) return 0u;
+
+    uint64_t duration = _gifFrameEndsMs[_gifFrameCount - 1u];
+    uint64_t cycle = elapsed / duration;
+    if (_gifPlayCount && cycle >= _gifPlayCount) return _gifFrameCount - 1u;
+
+    uint64_t phase = elapsed % duration;
+    size_t lo = 0u, hi = _gifFrameCount - 1u;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2u;
+        if (phase < _gifFrameEndsMs[mid]) hi = mid;
+        else lo = mid + 1u;
+    }
+    if (!_gifPlayCount || cycle + 1u < _gifPlayCount || lo + 1u < _gifFrameCount) {
+        uint64_t remaining = _gifFrameEndsMs[lo] - phase;
+        if (remaining < UINT64_MAX - elapsed) *nextChange = elapsed + remaining;
+    }
+    return lo;
 }
 
 @end
@@ -502,7 +527,8 @@ static XSCDecodedPage *XSCBuildStaticPage(XSCMmapBuffer *buf,
                                                             byteCount:moved.logicalSize
                                                         isAnimatedGIF:false
                                                         gifFrameCount:0u
-                                                     gifFrameDelaysMs:NULL
+                                                     gifFrameEndsMs:NULL
+                                                         gifPlayCount:1u
                                                               gifData:nil];
     if (!page) {
         XSCMmapFree(&moved);
@@ -1018,6 +1044,30 @@ static bool XSCGIFValidateHeaders(const uint8_t *bytes, size_t len) {
     return frameCount > 0u;
 }
 
+static bool XSCGIFGetPlayCount(const ExtensionBlock *blocks, int count, uint32_t *playCount) {
+    for (int i = 0; i + 1 < count; i++) {
+        const ExtensionBlock *app = &blocks[i];
+        const ExtensionBlock *data = &blocks[i + 1];
+        if (app->Function == APPLICATION_EXT_FUNC_CODE && app->ByteCount == 11 &&
+            (memcmp(app->Bytes, "NETSCAPE2.0", 11u) == 0 ||
+             memcmp(app->Bytes, "ANIMEXTS1.0", 11u) == 0) &&
+            data->Function == CONTINUE_EXT_FUNC_CODE && data->ByteCount == 3 && data->Bytes[0] == 1u) {
+            uint16_t repeats = XSCReadU16(data->Bytes + 1u, true);
+            *playCount = repeats ? (uint32_t)repeats + 1u : 0u;
+            return true;
+        }
+    }
+    return false;
+}
+
+static void XSCGIFFill(uint8_t *pixels, size_t count, const uint8_t color[4]) {
+    if (color[3] == 0u) {
+        memset(pixels, 0, count * 4u);
+        return;
+    }
+    for (size_t x = 0u; x < count; x++) memcpy(pixels + x * 4u, color, 4u);
+}
+
 static XSCDecodedPage *XSCDecodeGIF(XSCData *rawData) {
     const uint8_t *bytes = rawData.bytes;
     size_t len = rawData.length;
@@ -1067,15 +1117,21 @@ static XSCDecodedPage *XSCDecodeGIF(XSCData *rawData) {
     uint8_t *prevCanvas = NULL;
     defer { free(prevCanvas); }
 
-    uint32_t *delaysMs = NULL;
+    uint32_t *frameEnds = NULL;
     if (isAnimated) {
-        delaysMs = (uint32_t *)calloc(frameCount, sizeof(uint32_t));
-        if (!delaysMs) return nil;
+        frameEnds = (uint32_t *)malloc(frameCount * sizeof(*frameEnds));
+        if (!frameEnds) return nil;
     }
-    defer { free(delaysMs); }
-
-    static const int kInterlaceOffset[4] = { 0, 4, 2, 1 };
-    static const int kInterlaceJump[4] = { 8, 8, 4, 2 };
+    defer { free(frameEnds); }
+    uint32_t duration = 0u;
+    uint32_t playCount = 1u;
+    bool hasPlayCount = false;
+    uint8_t background[4] = {0};
+    if (gif->SColorMap && gif->SBackGroundColor < gif->SColorMap->ColorCount) {
+        GifColorType color = gif->SColorMap->Colors[gif->SBackGroundColor];
+        memcpy(background, (uint8_t[]){color.Red, color.Green, color.Blue, 255u}, 4u);
+    }
+    const uint8_t transparent[4] = {0};
     size_t frameBytes = outBuf.bytesPerRow * canvasH;
 
     for (size_t f = 0u; f < frameCount; f++) {
@@ -1093,9 +1149,15 @@ static XSCDecodedPage *XSCDecodeGIF(XSCData *rawData) {
         if (delayMs < 20u) {
             delayMs = 100u;
         }
-        if (delaysMs) {
-            delaysMs[f] = delayMs;
+        if (frameEnds) {
+            duration += delayMs;
+            frameEnds[f] = duration;
         }
+        if (!hasPlayCount) {
+            hasPlayCount = XSCGIFGetPlayCount(img->ExtensionBlocks, img->ExtensionBlockCount, &playCount);
+        }
+        const uint8_t *clearColor = gcb.TransparentColor == NO_TRANSPARENT_COLOR ? background : transparent;
+        if (f == 0u) XSCGIFFill(canvas, canvasW * canvasH, clearColor);
 
         if (gcb.DisposalMode == DISPOSE_PREVIOUS) {
             if (!prevCanvas) {
@@ -1111,46 +1173,27 @@ static XSCDecodedPage *XSCDecodeGIF(XSCData *rawData) {
         int fw = desc->Width;
         int fh = desc->Height;
 
-        if (img->RasterBits && cmap && cmap->Colors && fw > 0 && fh > 0) {
-            if (desc->Interlace) {
-                int srcRow = 0;
-                for (int pass = 0; pass < 4; pass++) {
-                    for (int y = kInterlaceOffset[pass]; y < fh && srcRow < fh; y += kInterlaceJump[pass], srcRow++) {
-                        int dstY = top + y;
-                        if (dstY < 0 || dstY >= (int)canvasH) continue;
-                        const GifByteType *srow = img->RasterBits + (size_t)srcRow * (size_t)fw;
-                        uint8_t *drow = canvas + (size_t)dstY * canvasW * 4u;
-                        for (int x = 0; x < fw; x++) {
-                            int dstX = left + x;
-                            if (dstX < 0 || dstX >= (int)canvasW) continue;
-                            int idx = (int)srow[x];
-                            if (idx == gcb.TransparentColor || idx >= cmap->ColorCount) continue;
-                            GifColorType c = cmap->Colors[idx];
-                            uint8_t *dp = drow + (size_t)dstX * 4u;
-                            dp[0] = c.Red;
-                            dp[1] = c.Green;
-                            dp[2] = c.Blue;
-                            dp[3] = 255u;
-                        }
-                    }
-                }
-            } else {
-                for (int y = 0; y < fh; y++) {
-                    int dstY = top + y;
-                    if (dstY < 0 || dstY >= (int)canvasH) continue;
-                    const GifByteType *srow = img->RasterBits + (size_t)y * (size_t)fw;
-                    uint8_t *drow = canvas + (size_t)dstY * canvasW * 4u;
-                    for (int x = 0; x < fw; x++) {
-                        int dstX = left + x;
-                        if (dstX < 0 || dstX >= (int)canvasW) continue;
-                        int idx = (int)srow[x];
-                        if (idx == gcb.TransparentColor || idx >= cmap->ColorCount) continue;
-                        GifColorType c = cmap->Colors[idx];
-                        uint8_t *dp = drow + (size_t)dstX * 4u;
-                        dp[0] = c.Red;
-                        dp[1] = c.Green;
-                        dp[2] = c.Blue;
-                        dp[3] = 255u;
+        size_t width = 0u, height = 0u;
+        if (left >= 0 && top >= 0 && left < (int)canvasW && top < (int)canvasH) {
+            int availableWidth = (int)canvasW - left;
+            int availableHeight = (int)canvasH - top;
+            width = (size_t)(fw < availableWidth ? fw : availableWidth);
+            height = (size_t)(fh < availableHeight ? fh : availableHeight);
+        }
+        if (img->RasterBits && cmap && cmap->Colors && width && height) {
+            uint8_t palette[256][4];
+            for (int i = 0; i < cmap->ColorCount; i++) {
+                GifColorType color = cmap->Colors[i];
+                memcpy(palette[i], (uint8_t[]){color.Red, color.Green, color.Blue, 255u}, 4u);
+            }
+            // DGifSlurp already places interlaced rows in display order.
+            for (size_t y = 0u; y < height; y++) {
+                const GifByteType *src = img->RasterBits + y * (size_t)fw;
+                uint8_t *dst = canvas + ((y + (size_t)top) * canvasW + (size_t)left) * 4u;
+                for (size_t x = 0u; x < width; x++) {
+                    int index = src[x];
+                    if (index != gcb.TransparentColor && index < cmap->ColorCount) {
+                        memcpy(dst + x * 4u, palette[index], 4u);
                     }
                 }
             }
@@ -1165,14 +1208,10 @@ static XSCDecodedPage *XSCDecodeGIF(XSCData *rawData) {
         // Apply disposal mode for subsequent frame.
         if (f + 1u < frameCount) {
             if (gcb.DisposalMode == DISPOSE_BACKGROUND) {
-                int x0 = left < 0 ? 0 : left;
-                int y0 = top < 0 ? 0 : top;
-                int x1 = (left + fw > (int)canvasW) ? (int)canvasW : (left + fw);
-                int y1 = (top + fh > (int)canvasH) ? (int)canvasH : (top + fh);
-                if (x0 < x1 && y0 < y1) {
-                    size_t clearBytes = (size_t)(x1 - x0) * 4u;
-                    for (int y = y0; y < y1; y++) {
-                        memset(canvas + ((size_t)y * canvasW + (size_t)x0) * 4u, 0, clearBytes);
+                if (width) {
+                    for (size_t y = 0u; y < height; y++) {
+                        uint8_t *row = canvas + ((y + (size_t)top) * canvasW + (size_t)left) * 4u;
+                        XSCGIFFill(row, width, clearColor);
                     }
                 }
             } else if (gcb.DisposalMode == DISPOSE_PREVIOUS && prevCanvas) {
@@ -1191,8 +1230,9 @@ static XSCDecodedPage *XSCDecodeGIF(XSCData *rawData) {
     XSCMmapBuffer movedBuf = outBuf;
     outBuf.ptr = NULL;
     outBuf.allocSize = 0u;
-    uint32_t *movedDelays = delaysMs;
-    delaysMs = NULL;
+    if (!hasPlayCount) XSCGIFGetPlayCount(gif->ExtensionBlocks, gif->ExtensionBlockCount, &playCount);
+    uint32_t *movedEnds = frameEnds;
+    frameEnds = NULL;
 
     size_t accountedBytes = movedBuf.logicalSize + rawData.length;
     XSCDecodedPage *page = [[XSCDecodedPage alloc] initWithMmapBuffer:movedBuf
@@ -1203,11 +1243,12 @@ static XSCDecodedPage *XSCDecodeGIF(XSCData *rawData) {
                                                             byteCount:accountedBytes
                                                         isAnimatedGIF:true
                                                         gifFrameCount:frameCount
-                                                     gifFrameDelaysMs:movedDelays
+                                                     gifFrameEndsMs:movedEnds
+                                                         gifPlayCount:playCount
                                                               gifData:rawData];
     if (!page) {
         XSCMmapFree(&movedBuf);
-        free(movedDelays);
+        free(movedEnds);
     }
     return page;
 }

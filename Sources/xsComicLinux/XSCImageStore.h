@@ -39,6 +39,9 @@ typedef struct XSCSizeF {
 /// Returns RGBA8 pixel pointer for animated GIF frame `frameIndex` (same dimensions as page).
 - (const uint8_t *)gifFramePixelsAtIndex:(size_t)frameIndex outDelayMs:(uint32_t *)outDelayMs;
 
+/// Returns the visible frame and the next change relative to playback start, or UINT64_MAX when done.
+- (size_t)gifFrameAtElapsedMs:(uint64_t)elapsed nextChangeMs:(uint64_t *)nextChange;
+
 @end
 
 typedef Optional(XSCDecodedPage *) XSCOptDecodedPage;

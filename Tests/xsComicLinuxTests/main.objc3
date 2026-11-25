@@ -1401,6 +1401,10 @@ static void testImageStoreCachePurgeableGrayGIFExif(XSCString *tmpDir) {
         const uint8_t *f1 = [gifPage gifFramePixelsAtIndex:1u outDelayMs:&delay1];
         XSC_ASSERT(f0 != NULL && f1 != NULL && delay0 >= 20u && delay1 >= 20u,
                    "animated GIF frames have valid RGBA buffers & delays (%u ms, %u ms)", delay0, delay1);
+        uint64_t nextChange = 0u;
+        uint64_t elapsed = 1000u * ((uint64_t)delay0 + delay1) + delay0;
+        XSC_ASSERT([gifPage gifFrameAtElapsedMs:elapsed nextChangeMs:&nextChange] == 1u &&
+                   nextChange == elapsed + delay1, "GIF timeline skips missed frames without accumulating drift");
         if (f0 != NULL && f1 != NULL) {
             XSC_ASSERT(f0[0] != f1[0] && f0[1] != f1[1],
                        "animated GIF frame 0 and frame 1 pixels differ as encoded");

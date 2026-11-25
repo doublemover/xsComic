@@ -522,6 +522,15 @@ size_t xsc_main_drain(void) {
     return ran;
 }
 
+uint64_t xsc_main_next_deadline_ms(void) {
+    pthread_mutex_lock(&gMainMutex);
+    defer { pthread_mutex_unlock(&gMainMutex); }
+    if (gMainHead) return 0u;
+    if (!gTimerHead) return UINT64_MAX;
+    uint64_t due = gTimerHead->_dueNs;
+    return due / 1000000u + (due % 1000000u != 0u);
+}
+
 bool xsc_main_wait_ms(uint64_t timeout_ms) {
     if (xsc_main_drain() > 0u) return true;
     uint64_t startNs = xsc_now_ns();

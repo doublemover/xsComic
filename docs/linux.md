@@ -108,7 +108,7 @@ XSCReaderModel ──────────► XSCArchive (XSCBook)
   │                         L8 grayscale repack, 4-lane priority pthread pool
   ▼
 XSCGLCanvas
-  OpenGL 3.3 Core, GL_R8 / GL_RGBA8 textures, inline GLSL 330 Lanczos-3 & EXIF 1–8
+  OpenGL 3.3 Core, GL_R8 / GL_RGBA8 textures, mipmapped minification & EXIF 1–8
 
 XSCBase — XSCObject ARC root, XSCString, XSCData, XSCError <Error>, XSCIndexList,
           main-thread queue/timers, and background pthread pool
@@ -156,9 +156,9 @@ XSCBase — XSCObject ARC root, XSCString, XSCData, XSCError <Error>, XSCIndexLi
   bytes by default. A decoded page owns its pixel mapping for as long as a
   caller or the cache retains it, including its use by the canvas.
 - **Native codecs and EXIF** cover JPEG, PNG, WebP, GIF, TIFF, AVIF, HEIF,
-  and 24/32-bit BMP. Animated GIFs retain composited frames and per-frame
-  delays. TIFF keeps the source orientation for the canvas and converts
-  libtiff's associated alpha to straight alpha before upload.
+  and 24/32-bit BMP. Animated GIFs retain composited frames and honor the
+  encoded frame timing and repeat count. TIFF keeps the source orientation for
+  the canvas and converts libtiff's associated alpha to straight alpha.
 - **Grayscale** JPEG and opaque grayscale PNG decode directly to 8-bit L8.
   Other static pages use L8 only if every decoded pixel is opaque and has
   identical red, green, and blue channels. Pixel rows are 64-byte aligned.
@@ -173,13 +173,16 @@ XSCBase — XSCObject ARC root, XSCString, XSCData, XSCError <Error>, XSCIndexLi
   honor 64-byte-aligned row strides.
 - Compiles an inline GLSL 330 Core shader once at startup using an empty VAO
   and `gl_VertexID` quads. The fragment shader performs EXIF 1–8 orientation
-  transforms, 6×6 separable Lanczos-3 downscaling whenever the downscale ratio
-  exceeds `1.05×` (switching to linear sampling for upscaling or 1:1), `.rrr1`
-  grayscale swizzling for `GL_R8` textures, and a 1 backing-pixel hairline
-  border.
+  transforms, `.rrr1` grayscale swizzling, and a one-pixel border. The canvas
+  generates mipmaps when a texture first shrinks below native size and uses
+  trilinear minification. Native size and upscaling use linear filtering.
+  Color uploads use premultiplied alpha to keep transparent pixels from
+  tinting edges during filtering.
 - Decode-once, GPU-scale-always: focal-point zooming (`0.1×`–`16×`), drag
   panning, resizing, and toggling the sidebar never re-decode images.
-  Multi-frame animated GIFs advance in-place via `tickAnimationAtMs:`.
+  A page keeps its texture and playback position when it moves to the other
+  side of a spread. GIF playback schedules actual frame deadlines and skips
+  missed frames without slowing the animation.
 
 ### `XSCReaderModel` & desktop shell ([`XSCReaderModel.h`](../Sources/xsComicLinux/XSCReaderModel.h), [`XSCReaderModel.objc3`](../Sources/xsComicLinux/XSCReaderModel.objc3), [`main.objc3`](../Sources/xsComicLinux/main.objc3))
 
@@ -195,8 +198,8 @@ XSCBase — XSCObject ARC root, XSCString, XSCData, XSCError <Error>, XSCIndexLi
   crossing volumes swaps seamlessly.
 - **Desktop shell (`main.objc3`)**: Single-process SDL2 + OpenGL 3.3 Core +
   `SDL2_ttf` (DejaVu Sans / Liberation Sans) reactive event loop using
-  `SDL_WaitEventTimeout` woken instantaneously by a registered SDL user event
-  from `xsc_set_main_wakeup` (zero busy-wait). Draws dark-chrome UI elements
+  `SDL_WaitEventTimeout`, a user event for queued main-thread work, and deadlines
+  for timers, GIFs, and the text caret. Draws dark-chrome UI elements
   via an inline SDF rounded-rectangle shader and an LRU glyph texture cache:
   top toolbar, collapsible 180 px page sidebar, empty-state CTA card, direct
   Jump-to-Page modal, settings popover persisted to

@@ -114,6 +114,8 @@ void xsc_dispatch_main(XSCVoidBlock block);
 void xsc_dispatch_main_after_ms(uint64_t delay_ms, XSCVoidBlock block);
 size_t xsc_main_drain(void);
 bool xsc_main_wait_ms(uint64_t timeout_ms);
+/// Monotonic wakeup time for queued main work, or UINT64_MAX when idle.
+uint64_t xsc_main_next_deadline_ms(void);
 
 // Background work dispatch (replaces GCD global concurrent queues)
 void xsc_dispatch_bg(XSCVoidBlock block);

@@ -1224,9 +1224,6 @@ static void xsc_sdl_wakeup(void) {
 
 @property (nonatomic, readonly) bool shouldQuit;
 @property (nonatomic, readonly) bool needsRedraw;
-@property (nonatomic, readonly) bool isAnimatingGIF;
-@property (nonatomic, readonly) bool showJumpModal;
-@property (nonatomic, readonly) bool isModelLoading;
 
 - (instancetype)initWithWindow:(SDL_Window *)window
                          model:(XSCReaderModel *)model
@@ -1236,6 +1233,7 @@ static void xsc_sdl_wakeup(void) {
 
 - (void)handleSDLEvent:(const SDL_Event *)ev;
 - (void)tickAtMs:(uint64_t)nowMs;
+- (int)eventWaitAtMs:(uint64_t)nowMs;
 - (void)renderFrame;
 - (XSCScreenshotState)screenshotState;
 - (XSCString *)screenshotError;
@@ -1269,6 +1267,7 @@ static void xsc_sdl_wakeup(void) {
     size_t _jumpLen;
     bool _jumpSelectAll;
     bool _jumpInvalid;
+    bool _jumpCaretVisible;
     uint64_t _jumpBlinkOriginMs;
 
     bool _showSettings;
@@ -1296,7 +1295,6 @@ static void xsc_sdl_wakeup(void) {
     bool _needsRedraw;
     bool _hasDisplayedPage;
     bool _hasDisplayedStatus;
-    bool _isAnimatingGIF;
     bool _cliPostOpenApplied;
     bool _waitingPostJump;
 
@@ -1304,9 +1302,6 @@ static void xsc_sdl_wakeup(void) {
 
 - (bool)shouldQuit { return _shouldQuit; }
 - (bool)needsRedraw { return _needsRedraw; }
-- (bool)isAnimatingGIF { return _isAnimatingGIF; }
-- (bool)showJumpModal { return _showJumpModal; }
-- (bool)isModelLoading { return _model ? _model.isLoading : false; }
 
 - (instancetype)initWithWindow:(SDL_Window *)window
                          model:(XSCReaderModel *)model
@@ -1657,18 +1652,6 @@ static void xsc_sdl_wakeup(void) {
         _waitingPostJump = false;
     }
 
-    // Track whether either visible page is an animated GIF so the loop paces at 60 Hz only when needed.
-    bool anim = false;
-    match(leftPage) {
-        case .Some(let p): { if (p && p.isAnimatedGIF && p.gifFrameCount > 1u) anim = true; }
-        case .None: {}
-    }
-    match(rightPage) {
-        case .Some(let p): { if (p && p.isAnimatedGIF && p.gifFrameCount > 1u) anim = true; }
-        case .None: {}
-    }
-    _isAnimatingGIF = anim;
-
     _needsRedraw = true;
 }
 
@@ -1950,12 +1933,10 @@ static void xsc_sdl_wakeup(void) {
 }
 
 - (void)handleMouseWheel:(const SDL_MouseWheelEvent *)wev {
-    if (_showJumpModal) return;
+    if (_showJumpModal || _showSettings) return;
 
-    int mx = 0, my = 0;
-    SDL_GetMouseState(&mx, &my);
-    float ptrX = (_mouseX >= 0.0f) ? _mouseX : (float)mx;
-    float ptrY = (_mouseY >= 0.0f) ? _mouseY : (float)my;
+    float ptrX = (float)wev->mouseX;
+    float ptrY = (float)wev->mouseY;
 
     float wx = wev->preciseX;
     float wy = wev->preciseY;
@@ -2000,6 +1981,7 @@ static void xsc_sdl_wakeup(void) {
                 || ev->window.event == SDL_WINDOWEVENT_RESIZED
                 || ev->window.event == SDL_WINDOWEVENT_EXPOSED
                 || ev->window.event == SDL_WINDOWEVENT_MAXIMIZED
+                || ev->window.event == SDL_WINDOWEVENT_DISPLAY_CHANGED
                 || ev->window.event == SDL_WINDOWEVENT_RESTORED) {
                 [self syncWindowMetrics];
                 _needsRedraw = true;
@@ -2062,15 +2044,17 @@ static void xsc_sdl_wakeup(void) {
             [self handleMouseWheel:&ev->wheel];
             break;
 
-        case SDL_MULTIGESTURE:
-            if (!_showJumpModal && fabsf(ev->mgesture.dDist) > 1e-4f) {
-                float gx = ev->mgesture.x * (float)_winW - _layout.canvas.x;
-                float gy = ev->mgesture.y * (float)_winH - _layout.canvas.y;
-                float factor = 1.0f + ev->mgesture.dDist * 4.0f;
-                [_canvas zoomAroundPointX:gx y:gy factor:factor];
+        case SDL_MULTIGESTURE: {
+            float x = ev->mgesture.x * (float)_winW;
+            float y = ev->mgesture.y * (float)_winH;
+            if (!_showJumpModal && !_showSettings && fabsf(ev->mgesture.dDist) > 1e-4f &&
+                xsc_pt_in_rect(x, y, _layout.canvas)) {
+                float factor = expf(fminf(1.0f, fmaxf(-1.0f, ev->mgesture.dDist * 4.0f)));
+                [_canvas zoomAroundPointX:x - _layout.canvas.x y:y - _layout.canvas.y factor:factor];
                 _needsRedraw = true;
             }
             break;
+        }
 
         case SDL_DROPFILE: {
             char *dropped = ev->drop.file;
@@ -2087,12 +2071,11 @@ static void xsc_sdl_wakeup(void) {
         }
 
         default:
-            if (ev->type == gWakeupEventType) {
-                _needsRedraw = true;
-            }
             break;
     }
 }
+
+static const uint64_t kXSCCaretHalfPeriodMs = 530u;
 
 - (void)tickAtMs:(uint64_t)nowMs {
     [self pollFilePicker];
@@ -2102,6 +2085,33 @@ static void xsc_sdl_wakeup(void) {
     if ([_canvas tickAnimationAtMs:nowMs]) {
         _needsRedraw = true;
     }
+    if (_showJumpModal) {
+        uint64_t elapsed = nowMs >= _jumpBlinkOriginMs ? nowMs - _jumpBlinkOriginMs : 0u;
+        bool visible = (elapsed / kXSCCaretHalfPeriodMs) % 2u == 0u;
+        if (visible != _jumpCaretVisible) {
+            _jumpCaretVisible = visible;
+            _needsRedraw = true;
+        }
+    }
+}
+
+- (int)eventWaitAtMs:(uint64_t)nowMs {
+    // The main queue sends an SDL event. Only the picker pipe needs polling,
+    // with a slow fallback for an unavailable SDL wakeup event.
+    uint64_t wait = (_filePickerPID > 0 || gWakeupEventType == (Uint32)-1) ? 50u : 1000u;
+    uint64_t animation = [_canvas nextAnimationDeadlineMs];
+    uint64_t work = xsc_main_next_deadline_ms();
+    uint64_t deadline = work < animation ? work : animation;
+    uint64_t untilDeadline = deadline > nowMs ? deadline - nowMs : 0u;
+    if (untilDeadline < wait) wait = untilDeadline;
+    if (_showJumpModal) {
+        uint64_t elapsed = nowMs >= _jumpBlinkOriginMs ? nowMs - _jumpBlinkOriginMs : 0u;
+        bool visible = (elapsed / kXSCCaretHalfPeriodMs) % 2u == 0u;
+        if (visible != _jumpCaretVisible) return 0;
+        uint64_t untilBlink = kXSCCaretHalfPeriodMs - elapsed % kXSCCaretHalfPeriodMs;
+        if (untilBlink < wait) wait = untilBlink;
+    }
+    return (int)wait;
 }
 
 #pragma mark - Chrome & Overlay Rendering
@@ -2581,8 +2591,7 @@ static void xsc_sdl_wakeup(void) {
     }
 
     // Caret (blinks interactively, always crisp & visible on screenshot capture)
-    uint64_t elapsed = (uint64_t)xsc_now_ms() - _jumpBlinkOriginMs;
-    bool caretVisible = (_opts.screenshotPath != NULL) || (((elapsed / 530ULL) % 2ULL) == 0ULL);
+    bool caretVisible = (_opts.screenshotPath != NULL) || _jumpCaretVisible;
     if (caretVisible) {
         [ui drawRect:(XSCRectF){ textX + textW + 1.5f, L->jumpInput.y + 8.0f, 1.8f, L->jumpInput.height - 16.0f }
                 fill:kColAccent];
@@ -2663,7 +2672,6 @@ static void xsc_sdl_wakeup(void) {
 - (bool)captureScreenshotToPath:(const char *)path {
     [self syncWindowMetrics];
     [self renderSceneToBackbuffer];
-    glFinish();
 
     size_t pixelBytes = (size_t)_drawableW * (size_t)_drawableH * 4u;
     uint8_t *pixels = (uint8_t *)malloc(pixelBytes);
@@ -2674,9 +2682,7 @@ static void xsc_sdl_wakeup(void) {
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
     glReadPixels(0, 0, _drawableW, _drawableH, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
 
-    bool ok = xsc_write_rgba_png(path, _drawableW, _drawableH, pixels);
-    SDL_GL_SwapWindow(_window);
-    return ok;
+    return xsc_write_rgba_png(path, _drawableW, _drawableH, pixels);
 }
 
 @end
@@ -2970,26 +2976,13 @@ int main(int argc, char *argv[]) {
                 [app renderFrame];
             }
 
-            int waitMs = 100;
-            if (opts.screenshotPath) {
-                waitMs = 10;
-            } else if (app.isAnimatingGIF) {
-                waitMs = 16;
-            } else if (app.isModelLoading) {
-                waitMs = 20;
-            } else if (app.showJumpModal) {
-                waitMs = 250;
-            }
-
+            int waitMs = [app eventWaitAtMs:(uint64_t)xsc_now_ms()];
             SDL_Event ev;
             if (SDL_WaitEventTimeout(&ev, waitMs)) {
                 [app handleSDLEvent:&ev];
                 while (!app.shouldQuit && SDL_PollEvent(&ev)) {
                     [app handleSDLEvent:&ev];
                 }
-            } else if (app.showJumpModal) {
-                // Periodic caret blink wakeup.
-                [app renderFrame];
             }
         }
     }
