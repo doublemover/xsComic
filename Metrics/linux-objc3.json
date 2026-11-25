@@ -1,0 +1,343 @@
+{
+  "schema_version": 1,
+  "label": "linux-objc3",
+  "measurement_kind": "linux_objc3_release_audit",
+  "measured_at": "2026-11-25T15:07:00Z",
+  "environment": {
+    "host_os": "macOS 27.0.1 (26A434)",
+    "host_cpu": "Apple M5 Pro",
+    "host_architecture": "arm64",
+    "container_image": "xscomic-objc3:dev",
+    "container_os": "Debian GNU/Linux 13.8 (trixie)",
+    "container_kernel": "Linux 7.0.12-linuxkit aarch64",
+    "target_triple": "aarch64-unknown-linux-gnu",
+    "compiler": "Slopjective-C objc3c v0.1.0-preview.1",
+    "objc3c_frontend_hash": "2109704150a84dddbd4639529a9b161f0a20146ca6550abcd371cc4fc0d03b68",
+    "clang": "23.1.5 (llvm 392dfff97d29b59d77e5cac6d4b6ef2585fe7117)",
+    "objc_runtime": "GNUstep 2.2 ABI (libobjc.so.4.6, zero GNUstep-Base)",
+    "opengl_headless_renderer": "llvmpipe (LLVM 19.1.7, 128 bits), OpenGL 4.5 Core Profile (Mesa 25.0.7-2+deb13u1)"
+  },
+  "source": {
+    "digest_schema": "cbr-source-digest-v6",
+    "sha256": "53072ef1aeda82389048ec39324f57fe653de87ac4a554a9333f1a245d3cd80d"
+  },
+  "production_source": {
+    "objc3_files": 6,
+    "header_files": 5,
+    "objc3_lines": 11171,
+    "header_lines": 485,
+    "total_lines": 11656,
+    "total_bytes": 415924
+  },
+  "test_source": {
+    "objc3_files": 1,
+    "lines": 2584,
+    "bytes": 115025
+  },
+  "build": {
+    "release_flags": "-std=c17 -D_GNU_SOURCE -Wall -Wextra -Werror -Oz -ffunction-sections -fdata-sections -flto=thin -Wl,--gc-sections -Wl,--as-needed + strip --strip-all",
+    "debug_flags": "-std=c17 -D_GNU_SOURCE -Wall -Wextra -Werror -O0 -g -Wl,--as-needed",
+    "clean_release_build_seconds": 2.636,
+    "output_path": "build/linux/xscomic",
+    "symbols_path": "build/linux/xscomic.symbols"
+  },
+  "correctness": {
+    "suite": "./scripts/run-linux-tests.sh",
+    "runs": 3,
+    "assertions_passed": 183,
+    "assertions_failed": 0,
+    "sanitizers": {
+      "asan_ubsan_lsan": "183 passed, 0 failed, 0 leaks, 0 errors",
+      "tsan": "183 passed, 0 failed (3/3 runs), 0 data races, 0 lock-order inversions"
+    }
+  },
+  "benchmarks": {
+    "runs": 3,
+    "archive_scan_4096": {
+      "page_count": 4096,
+      "median_ms": 1.13,
+      "fastest_ms": 1.12,
+      "slowest_ms": 1.13,
+      "samples_ms": [
+        1.13,
+        1.12,
+        1.13
+      ]
+    },
+    "cbz_open_128": {
+      "page_count": 128,
+      "median_ms": 0.035,
+      "fastest_ms": 0.034,
+      "slowest_ms": 0.038,
+      "samples_ms": [
+        0.034,
+        0.038,
+        0.035
+      ]
+    },
+    "cbz_open_500": {
+      "page_count": 500,
+      "median_ms": 0.075,
+      "fastest_ms": 0.07,
+      "slowest_ms": 0.078,
+      "samples_ms": [
+        0.078,
+        0.07,
+        0.075
+      ]
+    },
+    "cold_jpeg_decode": {
+      "width": 1024,
+      "height": 1536,
+      "median_ms": 2.66,
+      "fastest_ms": 2.63,
+      "slowest_ms": 2.75,
+      "samples_ms": [
+        2.66,
+        2.75,
+        2.63
+      ]
+    },
+    "sync_cache_hit_lookup": {
+      "iterations": 10000,
+      "median_ns_per_call": 47.7,
+      "fastest_ns_per_call": 47.5,
+      "slowest_ns_per_call": 50.3,
+      "samples_ns_per_call": [
+        50.3,
+        47.5,
+        47.7
+      ]
+    },
+    "test_process_rss": {
+      "source": "/proc/self/statm",
+      "median_mib": 42.8,
+      "median_bytes": 44879872,
+      "lowest_mib": 42.68,
+      "lowest_bytes": 44756992,
+      "highest_mib": 42.82,
+      "highest_bytes": 44900352
+    }
+  },
+  "cold_launch_to_render": {
+    "resolution": "1280x800",
+    "renderer": "Mesa llvmpipe software OpenGL 3.3 Core (LIBGL_ALWAYS_SOFTWARE=1)",
+    "samples_per_mode": 5,
+    "cbz_10p_1024x1536_direct_xvfb": {
+      "description": "Cold process launch -> SDL2/GL init -> CBZ open -> page 1 JPEG decode -> GL render -> PNG write against running Xvfb display",
+      "median_ms": 105.1,
+      "fastest_ms": 99.76,
+      "slowest_ms": 113.11,
+      "samples_ms": [
+        102.27,
+        99.76,
+        105.1,
+        109.44,
+        113.11
+      ]
+    },
+    "cbz_10p_1024x1536_via_xvfb_run": {
+      "description": "End-to-end including xvfb-run Xvfb server startup and teardown",
+      "median_ms": 154.37,
+      "fastest_ms": 134.63,
+      "slowest_ms": 189.07,
+      "samples_ms": [
+        189.07,
+        134.63,
+        146.9,
+        154.65,
+        154.37
+      ]
+    },
+    "empty_state_direct_xvfb": {
+      "description": "Includes deterministic 150 ms empty-state screenshot settle gate in main.objc3",
+      "median_ms": 241.03,
+      "fastest_ms": 228.6,
+      "slowest_ms": 249.52,
+      "samples_ms": [
+        239.04,
+        249.52,
+        241.03,
+        228.6,
+        246.39
+      ]
+    },
+    "empty_state_via_xvfb_run": {
+      "description": "Includes xvfb-run startup/teardown plus 150 ms empty-state settle gate",
+      "median_ms": 269.25,
+      "fastest_ms": 254.4,
+      "slowest_ms": 304.91,
+      "samples_ms": [
+        304.91,
+        269.25,
+        261.9,
+        269.97,
+        254.4
+      ]
+    }
+  },
+  "footprint": {
+    "stripped_executable_bytes": 290848,
+    "stripped_executable_kib": 284.0,
+    "retained_symbol_executable_bytes": 451664,
+    "retained_symbol_executable_kib": 441.1,
+    "debug_executable_bytes": 894560,
+    "debug_executable_kib": 873.6,
+    "elf_format": "ELF64 AArch64 PIE (DYN)",
+    "size_berkeley": {
+      "text_bytes": 259369,
+      "data_bytes": 27492,
+      "bss_bytes": 5032,
+      "total_dec_bytes": 291893
+    },
+    "elf_sections_bytes": {
+      ".text": 125456,
+      ".rela.dyn": 49560,
+      ".rodata": 26243,
+      ".eh_frame": 22792,
+      ".data": 20020,
+      ".eh_frame_hdr": 6964,
+      ".dynsym": 6576,
+      ".rela.plt": 6360,
+      ".gcc_except_table": 5356,
+      ".dynstr": 4803,
+      ".bss": 4624,
+      ".plt": 4272,
+      "__objc_metadata_total": 3688,
+      "__objc_selectors": 3040,
+      ".got.plt": 2144,
+      ".data.rel.ro": 848,
+      ".dynamic": 672,
+      ".gnu.version": 548,
+      ".comment": 467,
+      ".shstrtab": 414,
+      ".relro_padding": 408,
+      "__objc_protocols": 264,
+      "__objc_class_refs": 136,
+      "__objc_classes": 136,
+      "__objc_cats": 56,
+      "__objc_constant_string": 32,
+      "__objc_class_aliases": 16,
+      "__objc_protocol_refs": 8
+    },
+    "top_15_symbols": [
+      {
+        "name": "XSCDecodeWorkerMain",
+        "type": "t",
+        "bytes": 6916
+      },
+      {
+        "name": "_i_XSCAppController__drawToolbarFull",
+        "type": "t",
+        "bytes": 5908
+      },
+      {
+        "name": "gSpillRoot",
+        "type": "b",
+        "bytes": 4096
+      },
+      {
+        "name": "_c_XSCBook__openLibarchiveAtPath_sourcePath_cancelFlag_",
+        "type": "t",
+        "bytes": 3732
+      },
+      {
+        "name": "_c_XSCBook__openTarAtPath_sourcePath_cancelFlag_",
+        "type": "t",
+        "bytes": 3196
+      },
+      {
+        "name": "_c_XSCBook__openZipAtPath_sourcePath_cancelFlag_",
+        "type": "t",
+        "bytes": 3160
+      },
+      {
+        "name": "_i_XSCBook__readPageDataAtIndex_",
+        "type": "t",
+        "bytes": 3008
+      },
+      {
+        "name": "main",
+        "type": "T",
+        "bytes": 2736
+      },
+      {
+        "name": "XSCStoreFinishDecode",
+        "type": "t",
+        "bytes": 2640
+      },
+      {
+        "name": "_i_XSCReaderModel__presentCurrentSpreadWithContinueAcrossVolumes_",
+        "type": "t",
+        "bytes": 2588
+      },
+      {
+        "name": "_i_XSCAppController__syncWindowMetrics",
+        "type": "t",
+        "bytes": 2044
+      },
+      {
+        "name": "_i_XSCAppController__handleMouseDownX_y_button_",
+        "type": "t",
+        "bytes": 1888
+      },
+      {
+        "name": "_i_XSCAppController__drawSidebar",
+        "type": "t",
+        "bytes": 1888
+      },
+      {
+        "name": "_i_XSCAppController__drawJumpModal",
+        "type": "t",
+        "bytes": 1884
+      },
+      {
+        "name": "_c_XSCBook__adjacentVolumePathFor_step_cancelFlag_",
+        "type": "t",
+        "bytes": 1788
+      }
+    ],
+    "dynamic_dependencies": {
+      "direct_needed_count": 16,
+      "unused_direct_dependencies": 0,
+      "trimmed_by_as_needed": [
+        "libEGL.so.1",
+        "libstdc++.so.6"
+      ],
+      "transitive_ldd_entries": 105,
+      "direct_needed": [
+        "libz.so.1",
+        "libarchive.so.13",
+        "libjpeg.so.62",
+        "libpng16.so.16",
+        "libwebp.so.7",
+        "libgif.so.7",
+        "libtiff.so.6",
+        "libavif.so.16",
+        "libheif.so.1",
+        "libSDL2-2.0.so.0",
+        "libSDL2_ttf-2.0.so.0",
+        "libGL.so.1",
+        "libm.so.6",
+        "libobjc.so.4.6",
+        "libgcc_s.so.1",
+        "libc.so.6"
+      ]
+    }
+  },
+  "sha256": {
+    "stripped_executable": "253440ff0b7763bae451c7de30a943aea6912f0bd3cc436c212a87851cf66006",
+    "retained_symbol_executable": "bdf72e82242baad9222bd2a0ba49c524cfd4de3008581b3464447958ff14592d"
+  },
+  "runtime_policy": {
+    "image_loading": "off-main 4-lane priority pthread pool (3 prefetch max, 1 reserved for visible demand)",
+    "image_cache_limit_bytes": 67108864,
+    "image_cache_entry_limit": 12,
+    "pixel_buffer_backing": "page-aligned anonymous mmap + madvise(MADV_FREE) volatile marking",
+    "grayscale_optimization": "32x32 chroma probe repacking static grayscale manga to 8-bit L8 (GL_R8)",
+    "forward_prefetch_pages": 8,
+    "backward_buffer_pages": 2,
+    "adjacent_volume_prewarm_margin_pages": 3,
+    "loading_grace_ms": 120
+  }
+}

@@ -50,3 +50,4 @@ Metrics/*.json
 !Metrics/release-x86_64.json
 !Metrics/release-arm64.json
 !Metrics/dmg.json
+!Metrics/linux-objc3.json
