@@ -61,7 +61,9 @@ Native **Objective-C 3.0, SDL2, and OpenGL 3.3 Core** port (`Sources/xsComicLinu
 Compiles `.objc3` sources directly with `objc3c` (`-Oz -flto=thin -Wl,--gc-sections -Wl,--as-needed` + `strip`) against system Linux libraries (`zlib`, `libarchive`, `libjpeg-turbo`, `libpng`, `libwebp`, `giflib`, `libtiff`, `libavif`, `libheif`, `SDL2`, `SDL2_ttf`, OpenGL, `pthreads`). On Linux with `objc3c` (or `/opt/objc3c/activate.sh`) installed, all scripts run natively; on macOS or hosts without the SDK, they automatically build and delegate through [`scripts/docker-env.sh`](scripts/docker-env.sh) and [`docker/Dockerfile`](docker/Dockerfile).
 
 [Linux CI](.github/workflows/linux.yml) builds the pinned SDK image on x86-64
-and AArch64 and runs core, sanitizer, and rendered-image checks.
+and AArch64 and runs core, sanitizer, and rendered-image checks. The
+ThreadSanitizer run instruments both the app and the release's libobjc2 sources
+with the pinned SDK, then uses its `llvm-symbolizer` for source locations.
 
 [macOS CI](.github/workflows/macos.yml) builds the native AppKit app on Apple Silicon
 and runs its reader tests in parallel. The ObjC3 port depends on expanded Darwin

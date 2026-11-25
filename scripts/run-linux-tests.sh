@@ -116,4 +116,7 @@ done
 objc3c "${OBJECTS[@]}" "${LINK_FLAGS[@]}" "${SANITIZER_FLAGS[@]}" -o "$OUT_BIN"
 chmod 755 "$OUT_BIN"
 
+if [[ "${XSCOMIC_TEST_SANITIZER:-}" == thread ]]; then
+    exec python3 "$ROOT/Tests/xsComicLinuxTests/with-thread-runtime.py" "$OUT_BIN" "$@"
+fi
 exec "$OUT_BIN" "$@"
