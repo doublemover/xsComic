@@ -129,6 +129,10 @@ static const uint64_t kXSCLoadingGraceMs = 120ULL;
 }
 
 - (void)dealloc {
+    [self cancelBackgroundWork];
+}
+
+- (void)cancelBackgroundWork {
     [_openCancelToken cancel];
     [_prewarmNextToken cancel];
     [_prewarmPrevToken cancel];

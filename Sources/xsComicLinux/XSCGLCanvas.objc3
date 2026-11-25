@@ -415,9 +415,6 @@ GLuint xsc_gl_build_program(const XSCGLProcs *gl,
     if (!page || page.pixelWidth == 0u || page.pixelHeight == 0u) {
         return;
     }
-    if (![page pinNonVolatile]) {
-        return;
-    }
 
     const uint8_t *pixels = NULL;
     bool uploadGray = page.isGrayscale;
@@ -502,9 +499,6 @@ GLuint xsc_gl_build_program(const XSCGLProcs *gl,
     }
 
     size_t nextFrame = (slot->gifFrame + 1u) % page.gifFrameCount;
-    if (![page pinNonVolatile]) {
-        return false;
-    }
     uint32_t delayMs = 0u;
     const uint8_t *framePixels = [page gifFramePixelsAtIndex:nextFrame outDelayMs:&delayMs];
     if (!framePixels) {

@@ -5,10 +5,8 @@
 
 /*
  XSCImageStore owns decoded comic pages on Linux:
-   - Page-aligned mmap(MAP_PRIVATE | MAP_ANONYMOUS) pixel storage so off-screen
-     cached pages can be marked MADV_FREE (reclaimable by Linux without swap).
-   - Monochrome fast path (8-bit L8) and 32x32 chroma probe repacking visually
-     grayscale manga from RGBA8 to L8 (4x memory reduction).
+   - Page-aligned pixel mappings owned by decoded pages.
+   - 8-bit monochrome fast path and lossless RGBA8-to-L8 repacking.
    - Native Linux codecs (libjpeg-turbo, libpng, libwebp, giflib, libtiff,
      built-in BMP, plus libavif/libheif when available) with EXIF 1..8 parsing.
    - Bounded LRU cache (12 entries / 64 MiB default), request coalescing,
@@ -21,7 +19,7 @@ typedef struct XSCSizeF {
     float height;
 } XSCSizeF;
 
-/// Decoded page backed by a page-aligned purgeable pixel buffer (L8 grayscale or RGBA8 color).
+/// Decoded page backed by a page-aligned pixel buffer (L8 grayscale or RGBA8 color).
 @interface XSCDecodedPage : XSCObject
 
 @property (nonatomic, readonly) const uint8_t *pixels;
@@ -41,18 +39,12 @@ typedef struct XSCSizeF {
 /// Returns RGBA8 pixel pointer for animated GIF frame `frameIndex` (same dimensions as page).
 - (const uint8_t *)gifFramePixelsAtIndex:(size_t)frameIndex outDelayMs:(uint32_t *)outDelayMs;
 
-/// Pins the page non-volatile before GPU upload/display. Returns false if purged.
-- (bool)pinNonVolatile;
-
-/// Marks the backing buffer volatile via madvise(MADV_FREE) for kernel reclaim under pressure.
-- (void)markVolatile;
-
 @end
 
 typedef Optional(XSCDecodedPage *) XSCOptDecodedPage;
 typedef void (^XSCPageCompletion)(XSCOptDecodedPage page, bool failed);
 
-/// Bounded, purgeable, concurrent image decode store with a lock-protected synchronous fast path.
+/// Bounded, concurrent image decode store with a lock-protected synchronous fast path.
 @interface XSCImageStore : XSCObject
 
 @property (nonatomic, readonly) size_t maxEntryCount;
@@ -63,8 +55,7 @@ typedef void (^XSCPageCompletion)(XSCOptDecodedPage page, bool failed);
 - (instancetype)init;
 - (instancetype)initWithMaxEntryCount:(size_t)maxEntries maxByteBudget:(size_t)maxBytes;
 
-/// Zero-hop synchronous cache lookup. Pins the returned page non-volatile.
-/// Returns None on miss or if the page was purged.
+/// Zero-hop synchronous cache lookup. Returns None on a miss.
 - (XSCOptDecodedPage)cachedPageForBook:(XSCBook *)book index:(size_t)index;
 
 /// Asynchronous decode request with coalescing and priority demand lane.
@@ -74,7 +65,7 @@ typedef void (^XSCPageCompletion)(XSCOptDecodedPage page, bool failed);
                   priority:(bool)isVisible
                 completion:(XSCPageCompletion)completion;
 
-/// Marks cached entries outside `visibleIndices` volatile and prefetches `orderedIndices`.
+/// Sets eviction priority and prefetches `orderedIndices`, prioritizing `visibleIndices`.
 - (void)updateRetentionAndPrefetchForBook:(XSCBook *)book
                            visibleIndices:(XSCIndexList *)visibleIndices
                            orderedIndices:(XSCIndexList *)orderedIndices;

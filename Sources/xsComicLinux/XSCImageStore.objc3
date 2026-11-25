@@ -1,25 +1,20 @@
 /*
- XSCImageStore.objc3 — Bounded, purgeable, concurrent image decode store for Linux.
+ XSCImageStore.objc3 — Bounded, concurrent image decode store for Linux.
 
  Architecture & Memory Strategy:
    1. Zero-hop synchronous fast path: `cachedPageForBook:index:` acquires an
       uncontended `pthread_mutex_t`, probes a compact open-addressed C hash table
-      (zero Foundation dictionary overhead), pins the page non-volatile, and
+      (zero Foundation dictionary overhead), and
       returns `Optional(XSCDecodedPage *)` on the calling thread.
    2. Native Linux codecs: libjpeg-turbo (`JCS_GRAYSCALE` & `JCS_EXT_RGBA`),
       libpng, libwebp, giflib (static + full multi-frame composited animated GIF),
       libtiff (in-memory `TIFFClientOpen`), built-in zero-dep 24/32-bit BMP,
       libavif, and libheif — with EXIF 1..8 orientation parsing and 16,384 px
       texture dimension enforcement.
-   3. 4x grayscale compression for manga: opaque monochrome JPEG/PNG sources
-      decode straight into 8-bit `L8` buffers. RGBA8 static pages are probed on a
-      32x32 grid (`A >= 253`, `|R-G| <= 2`, `|G-B| <= 2`) and, when visually
-      grayscale, repacked into an `L8` `mmap` buffer while `munmap`-ing the 4x
-      RGBA8 buffer immediately.
-   4. Purgeable volatile memory: pixel buffers are allocated with page-aligned
-      `mmap(MAP_PRIVATE | MAP_ANONYMOUS)` and 64-byte row alignment. Off-screen
-      cached pages are marked `madvise(MADV_FREE)` so Linux can reclaim them
-      lazily under memory pressure without swapping.
+   3. Opaque monochrome JPEG/PNG sources decode directly into 8-bit L8.
+      Other static pages are repacked only when every pixel is opaque and gray.
+   4. Pixel mappings remain valid for the lifetime of each decoded page.
+      Eviction releases the mapping as soon as its last owner drops it.
    5. 4-lane priority pthread decode pool: 4 worker threads with background
       prefetch/prewarm capped at 3 active lanes, reserving 1 lane at all times
       for visible demand (`priority == true`).
@@ -180,38 +175,21 @@ static inline bool XSCMmapAlloc(size_t width, size_t height, size_t bytesPerPixe
     return XSCMmapAllocFrames(width, height, bytesPerPixel, 1u, outBuf);
 }
 
-/*
- Samples a 32x32 grid across an RGBA8 buffer (byte order R, G, B, A).
- Returns true only if every sampled pixel is effectively opaque (A >= 253) and
- neutral (|R-G| <= 2 and |G-B| <= 2, tolerating minor JPEG chroma noise).
- */
-static bool XSCProbeRGBAIsGrayscale(const uint8_t *base, size_t width, size_t height, size_t bytesPerRow) {
-    if (!base || width == 0u || height == 0u) return false;
-    size_t stepY = height > 32u ? height / 32u : 1u;
-    size_t stepX = width > 32u ? width / 32u : 1u;
-    for (size_t y = 0u; y < height; y += stepY) {
+static bool XSCRGBAIsOpaqueGrayscale(const uint8_t *base, size_t width, size_t height,
+                                     size_t bytesPerRow) {
+    for (size_t y = 0u; y < height; y++) {
         const uint8_t *row = base + y * bytesPerRow;
-        for (size_t x = 0u; x < width; x += stepX) {
+        for (size_t x = 0u; x < width; x++) {
             const uint8_t *p = row + x * 4u;
-            int r = (int)p[0];
-            int g = (int)p[1];
-            int b = (int)p[2];
-            int a = (int)p[3];
-            if (a < 253 || abs(r - g) > 2 || abs(g - b) > 2) {
-                return false;
-            }
+            if (p[3] != 255u || p[0] != p[1] || p[1] != p[2]) return false;
         }
     }
     return true;
 }
 
-/*
- If `rgbaBuf` passes the 32x32 grayscale probe, repacks green channel into a 1 Bpp
- L8 mmap buffer and immediately unmaps the 4x RGBA buffer.
- */
 static bool XSCMaybeRepackRGBAToGray8(XSCMmapBuffer *buf, size_t width, size_t height) {
-    if (!buf || !buf->ptr) return false;
-    if (!XSCProbeRGBAIsGrayscale(buf->ptr, width, height, buf->bytesPerRow)) {
+    if (!buf || !buf->ptr ||
+        !XSCRGBAIsOpaqueGrayscale(buf->ptr, width, height, buf->bytesPerRow)) {
         return false;
     }
     XSCMmapBuffer grayBuf;
@@ -248,7 +226,6 @@ static bool XSCMaybeRepackRGBAToGray8(XSCMmapBuffer *buf, size_t width, size_t h
     size_t _gifFrameCount;
     uint32_t *_gifFrameDelaysMs;
     XSCData *_gifDataStorage;
-    _Atomic(bool) _volatile;
 }
 
 - (const uint8_t *)pixels { return _pixelBuffer; }
@@ -293,7 +270,6 @@ static bool XSCMaybeRepackRGBAToGray8(XSCMmapBuffer *buf, size_t width, size_t h
         _gifFrameCount = gifFrameCount;
         _gifFrameDelaysMs = gifFrameDelaysMs;
         _gifDataStorage = gifData;
-        atomic_init(&_volatile, false);
     }
     return self;
 }
@@ -327,27 +303,6 @@ static bool XSCMaybeRepackRGBAToGray8(XSCMmapBuffer *buf, size_t width, size_t h
         *outDelayMs = _gifFrameDelaysMs ? _gifFrameDelaysMs[idx] : 100u;
     }
     return _pixelBuffer + idx * _frameByteSize;
-}
-
-- (bool)pinNonVolatile {
-    if (!_pixelBuffer || _allocSize == 0u) {
-        return false;
-    }
-    atomic_store_explicit(&_volatile, false, memory_order_release);
-    return true;
-}
-
-- (void)markVolatile {
-    if (!_pixelBuffer || _allocSize == 0u) {
-        return;
-    }
-    if (!atomic_exchange_explicit(&_volatile, true, memory_order_acq_rel)) {
-#ifdef MADV_FREE
-        (void)madvise(_pixelBuffer, _allocSize, MADV_FREE);
-#else
-        (void)madvise(_pixelBuffer, _allocSize, MADV_DONTNEED);
-#endif
-    }
 }
 
 @end
@@ -1437,15 +1392,8 @@ static XSCDecodedPage *XSCDecodeTIFF(const uint8_t *bytes, size_t len) {
     TIFFGetFieldDefaulted(tif, TIFFTAG_ORIENTATION, &rawOrient);
     uint32_t exifOrient = (rawOrient >= 1u && rawOrient <= 8u) ? (uint32_t)rawOrient : 1u;
 
-    /*
-     libtiff's TIFFReadRGBAImageOriented treats orientations 1/2/5/6 as TOPLEFT
-     and 3/4/7/8 as BOTLEFT, flipping vertically if the requested orientation
-     differs. Request the matching vertical polarity so pixels remain raw and
-     `exifOrientation` is applied cleanly once by the renderer without double-flip.
-     */
-    int reqOrient = (exifOrient == 3u || exifOrient == 4u || exifOrient == 7u || exifOrient == 8u)
-                        ? ORIENTATION_BOTLEFT
-                        : ORIENTATION_TOPLEFT;
+    // Match both flip directions in libtiff. Apply the full orientation in GL.
+    int reqOrient = (int)(exifOrient <= 4u ? exifOrient : exifOrient - 4u);
 
     uint32_t *raster = (uint32_t *)malloc(srcW * srcH * sizeof(uint32_t));
     if (!raster) return nil;
@@ -1475,7 +1423,15 @@ static XSCDecodedPage *XSCDecodeTIFF(const uint8_t *bytes, size_t len) {
             dp[0] = (uint8_t)TIFFGetR(px);
             dp[1] = (uint8_t)TIFFGetG(px);
             dp[2] = (uint8_t)TIFFGetB(px);
-            dp[3] = (uint8_t)TIFFGetA(px);
+            unsigned int alpha = TIFFGetA(px);
+            dp[3] = (uint8_t)alpha;
+            // libtiff returns associated alpha. The canvas blends straight RGBA.
+            if (alpha > 0u && alpha < 255u) {
+                for (size_t channel = 0u; channel < 3u; channel++) {
+                    unsigned int straight = (dp[channel] * 255u + alpha / 2u) / alpha;
+                    dp[channel] = (uint8_t)(straight > 255u ? 255u : straight);
+                }
+            }
         }
     }
 
@@ -2262,6 +2218,7 @@ static void XSCPendingAppendCompletion(XSCPendingNode *node, XSCPageCompletion c
     size_t _maxEntryCount;
     size_t _maxByteBudget;
 
+    bool _syncInitialized;
     pthread_mutex_t _lock;
     XSCCacheTable _cache;
     XSCFailedSet _failedKeys;
@@ -2430,26 +2387,10 @@ static void XSCStoreFinishDecode(__unsafe_unretained XSCImageStore *store,
 
             if (page && !effectiveCancelled) {
                 size_t rank = SIZE_MAX;
-                bool keepPinned = false;
-                size_t retRank = SIZE_MAX;
-                bool hasRetRank = XSCRankTableGet(&store->_retentionRanks, key, &retRank);
-
                 if (pending && pending->_isVisible) {
                     rank = 0u;
-                    keepPinned = true;
-                } else if (hasRetRank) {
-                    rank = retRank;
-                    keepPinned = (rank == 0u);
-                } else if (isPrewarm) {
+                } else if (!XSCRankTableGet(&store->_retentionRanks, key, &rank) && isPrewarm) {
                     rank = 1000u;
-                    keepPinned = false;
-                } else {
-                    rank = SIZE_MAX;
-                    keepPinned = false;
-                }
-
-                if (!keepPinned) {
-                    [page markVolatile];
                 }
                 XSCStoreLockedInsertPage(store, page, key, bookID, rank);
             } else if (!page && !effectiveCancelled) {
@@ -2725,20 +2666,24 @@ static void XSCStoreShutdownInternal(__unsafe_unretained XSCImageStore *store) {
     if (self) {
         _maxEntryCount = maxEntries > 0u ? maxEntries : kXSCDefaultMaxEntries;
         _maxByteBudget = maxBytes > 0u ? maxBytes : kXSCDefaultMaxBytes;
-        pthread_mutex_init(&_lock, NULL);
-        pthread_mutex_init(&_poolLock, NULL);
-        pthread_cond_init(&_poolCond, NULL);
+        if (_maxEntryCount > SIZE_MAX / 8u || pthread_mutex_init(&_lock, NULL) != 0) {
+            return nil;
+        }
+        if (pthread_mutex_init(&_poolLock, NULL) != 0) {
+            pthread_mutex_destroy(&_lock);
+            return nil;
+        }
+        if (pthread_cond_init(&_poolCond, NULL) != 0) {
+            pthread_mutex_destroy(&_poolLock);
+            pthread_mutex_destroy(&_lock);
+            return nil;
+        }
+        _syncInitialized = true;
 
         size_t tableMin = _maxEntryCount * 4u;
         if (!XSCCacheTableInit(&_cache, tableMin) ||
             !XSCFailedSetInit(&_failedKeys, tableMin) ||
             !XSCRankTableInit(&_retentionRanks, tableMin)) {
-            XSCCacheTableDestroy(&_cache);
-            XSCFailedSetDestroy(&_failedKeys);
-            XSCRankTableDestroy(&_retentionRanks);
-            pthread_cond_destroy(&_poolCond);
-            pthread_mutex_destroy(&_poolLock);
-            pthread_mutex_destroy(&_lock);
             return nil;
         }
 
@@ -2765,6 +2710,7 @@ static void XSCStoreShutdownInternal(__unsafe_unretained XSCImageStore *store) {
 }
 
 - (void)dealloc {
+    if (!_syncInitialized) return;
     XSCStoreShutdownInternal(self);
     XSCCacheTableDestroy(&_cache);
     XSCFailedSetDestroy(&_failedKeys);
@@ -2800,11 +2746,6 @@ static void XSCStoreShutdownInternal(__unsafe_unretained XSCImageStore *store) {
         return None(XSCDecodedPage *);
     }
     XSCDecodedPage *page = (__bridge XSCDecodedPage *)slot->pageRef;
-    if (![page pinNonVolatile]) {
-        _currentByteCount -= page.byteCount;
-        XSCCacheTableRemoveSlot(&_cache, slot);
-        return None(XSCDecodedPage *);
-    }
     slot->lastAccessSeq = ++_accessSeq;
     return Some(XSCDecodedPage *, page);
 }
@@ -2834,17 +2775,11 @@ static void XSCStoreShutdownInternal(__unsafe_unretained XSCImageStore *store) {
         // 1. Check cache hit
         XSCCacheSlot *hit = XSCCacheTableFind(&_cache, key);
         if (hit && hit->pageRef) {
-            XSCDecodedPage *page = (__bridge XSCDecodedPage *)hit->pageRef;
-            if ([page pinNonVolatile]) {
-                hit->lastAccessSeq = ++_accessSeq;
-                if (isVisible) {
-                    hit->rank = 0u;
-                }
-                hitPage = page;
-            } else {
-                _currentByteCount -= page.byteCount;
-                XSCCacheTableRemoveSlot(&_cache, hit);
+            hit->lastAccessSeq = ++_accessSeq;
+            if (isVisible) {
+                hit->rank = 0u;
             }
+            hitPage = (__bridge XSCDecodedPage *)hit->pageRef;
         }
 
         if (!hitPage) {
@@ -2963,30 +2898,16 @@ static void XSCStoreShutdownInternal(__unsafe_unretained XSCImageStore *store) {
             }
         }
 
-        // Update retention ranks and purgeable states across resident entries.
+        // Update eviction priority across resident entries.
         for (size_t i = 0u; i < _cache.capacity; i++) {
             XSCCacheSlot *slot = &_cache.slots[i];
             if (slot->state != XSCSlotOccupied || !slot->pageRef) continue;
-            XSCDecodedPage *page = (__bridge XSCDecodedPage *)slot->pageRef;
 
             size_t newRank = SIZE_MAX;
-            bool isVisibleEntry = false;
             if (XSCRankTableGet(&_retentionRanks, slot->key, &newRank)) {
                 slot->rank = newRank;
-                isVisibleEntry = (newRank == 0u);
-            } else if (slot->bookID != bookID) {
-                slot->rank = 1000u;
             } else {
-                slot->rank = SIZE_MAX;
-            }
-
-            if (isVisibleEntry) {
-                if (![page pinNonVolatile]) {
-                    _currentByteCount -= page.byteCount;
-                    XSCCacheTableRemoveSlot(&_cache, slot);
-                }
-            } else {
-                [page markVolatile];
+                slot->rank = slot->bookID != bookID ? 1000u : SIZE_MAX;
             }
         }
 

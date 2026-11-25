@@ -29,6 +29,7 @@ typedef enum XSCArchiveErrorCode {
     XSCArchiveErrorEncrypted = 6,
     XSCArchiveErrorCancelled = 7,
     XSCArchiveErrorIOFailure = 8,
+    XSCArchiveErrorResourceLimit = 9,
 } XSCArchiveErrorCode;
 
 typedef enum XSCComparisonResult {
