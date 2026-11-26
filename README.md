@@ -64,9 +64,11 @@ Compiles `.objc3` sources directly with `objc3c` (`-Oz -flto=thin -Wl,--gc-secti
 and AArch64. Each runner runs the core suite and a release smoke test covering
 rendered images and X11 interaction.
 
-[macOS CI](.github/workflows/macos.yml) builds the native AppKit app on Apple Silicon
-and runs its reader tests in parallel. The Objective-C 3 core also has a native
-qualification entry point for the experimental Darwin SDK. Use the Xcode
+[macOS CI](.github/workflows/macos.yml) builds and verifies the AppKit app on
+Apple Silicon and runs its reader tests in parallel. It uses the `macos-26`
+runner by default. A manual run can select `macos-15` if runner allocation
+fails. The Objective-C 3 core also has a native qualification entry point
+for the experimental Darwin SDK. Use the Xcode
 version required by the installed SDK and install the codec dependencies.
 [Slopjective-C #8340](https://github.com/doublemover/Slopjective-C/issues/8340)
 
