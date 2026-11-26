@@ -10,6 +10,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: xscomic-linux-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   sdk:
     name: Linux ${{ matrix.arch }}
@@ -61,7 +65,7 @@ jobs:
           done
           exit "$status"
       - name: Preserve check logs
-        if: always()
+        if: "!cancelled()"
         uses: actions/upload-artifact@v4
         with:
           name: linux-${{ matrix.arch }}-logs

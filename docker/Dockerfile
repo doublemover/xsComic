@@ -65,6 +65,7 @@ RUN set -eu; \
         ninja-build \
         git \
         g++ \
+        llvm-19 \
         zlib1g-dev \
         libarchive-dev \
         libzstd1 \
@@ -106,7 +107,9 @@ RUN set -eu; \
         > /etc/profile.d/objc3c.sh; \
     chmod 0644 /etc/profile.d/objc3c.sh
 
-ENV OBJC3_SDK_VERSION="${OBJC3_SDK_VERSION}" \
+# Preview 1 does not bundle a symbolizer. Prefer the SDK tool once available.
+ENV XSCOMIC_TEST_SYMBOLIZER=/usr/bin/llvm-symbolizer-19 \
+    OBJC3_SDK_VERSION="${OBJC3_SDK_VERSION}" \
     OBJC3_SDK_SUMS_SHA256="${OBJC3_SDK_SUMS_SHA256}" \
     OBJC3C_SDK_ROOT="${OBJC3_SDK_ROOT_BASE}/current" \
     OBJC3C_CLANG_FOUNDATION_ROOT="${OBJC3_SDK_ROOT_BASE}/current" \

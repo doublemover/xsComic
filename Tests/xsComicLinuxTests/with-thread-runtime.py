@@ -97,7 +97,16 @@ def build_runtime(workdir, sdk):
 
 def run_tests(sdk, runtime, command):
     runtime = runtime.resolve(strict=True)
-    symbolizer = (sdk / "bin/llvm-symbolizer").resolve(strict=True)
+    symbolizer = sdk / "bin/llvm-symbolizer"
+    if not symbolizer.is_file():
+        fallback = os.environ.get("XSCOMIC_TEST_SYMBOLIZER")
+        if not fallback:
+            raise ValueError("The SDK has no llvm-symbolizer. Set XSCOMIC_TEST_SYMBOLIZER to an executable.")
+        symbolizer = Path(fallback)
+    if not symbolizer.is_absolute() or not symbolizer.is_file() or not os.access(symbolizer, os.X_OK):
+        raise ValueError(f"Expected an executable llvm-symbolizer at {symbolizer}")
+    symbolizer = symbolizer.resolve(strict=True)
+    print(f"ThreadSanitizer symbolizer: {symbolizer}", flush=True)
     symbols = subprocess.check_output(
         [sdk / "bin/llvm-readobj", "--dyn-symbols", runtime], text=True
     )

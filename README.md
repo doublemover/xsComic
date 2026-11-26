@@ -63,7 +63,9 @@ Compiles `.objc3` sources directly with `objc3c` (`-Oz -flto=thin -Wl,--gc-secti
 [Linux CI](.github/workflows/linux.yml) builds the pinned SDK image on x86-64
 and AArch64 and runs core, sanitizer, and rendered-image checks. The
 ThreadSanitizer run instruments both the app and the release's libobjc2 sources
-with the pinned SDK, then uses its `llvm-symbolizer` for source locations.
+with the pinned SDK. It uses the SDK's `llvm-symbolizer` when available.
+The Preview 1 image supplies Debian's `llvm-symbolizer-19` for diagnostics.
+Native Preview 1 users can set `XSCOMIC_TEST_SYMBOLIZER` to an absolute path.
 
 [macOS CI](.github/workflows/macos.yml) builds the native AppKit app on Apple Silicon
 and runs its reader tests in parallel. The Objective-C 3 core also has a native

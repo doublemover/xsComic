@@ -13,10 +13,12 @@ SANITIZER_FLAGS=()
 case ${XSCOMIC_TEST_SANITIZER:-} in
     "") ;;
     address)
+        OUT_BIN="$OUT_DIR/xsComicTests-address"
         SANITIZER_FLAGS=(-fsanitize=address,undefined -fno-omit-frame-pointer -g)
         export UBSAN_OPTIONS="${UBSAN_OPTIONS:-halt_on_error=1}"
         ;;
     thread)
+        OUT_BIN="$OUT_DIR/xsComicTests-thread"
         SANITIZER_FLAGS=(-fsanitize=thread -fno-omit-frame-pointer -g)
         export TSAN_OPTIONS="${TSAN_OPTIONS:-halt_on_error=1}"
         ;;
