@@ -113,16 +113,22 @@ def run_tests(sdk, runtime, command):
     if "Name: __tsan_init " not in symbols:
         raise ValueError(f"{runtime} lacks ThreadSanitizer instrumentation")
 
-    # Load this exact library ahead of the installed runtime for the test process only.
-    environment = dict(os.environ, LD_PRELOAD=str(runtime),
+    # Resolve the test binary's libobjc SONAME from the staged runtime first.
+    # A preload would also inject the instrumented DSO into the symbolizer.
+    library_path = str(runtime.parent)
+    if installed_libraries := os.environ.get("LD_LIBRARY_PATH"):
+        library_path += ":" + installed_libraries
+    environment = dict(os.environ, LD_LIBRARY_PATH=library_path,
                        TSAN_OPTIONS=f"halt_on_error=1:external_symbolizer_path={symbolizer}")
+    environment.pop("LD_PRELOAD", None)
     environment.pop("LD_TRACE_LOADED_OBJECTS", None)
     trace = subprocess.check_output(
         command[:1], env=dict(environment, LD_TRACE_LOADED_OBJECTS="1"), text=True
     )
     loaded = {line.strip().split(" (")[0].split(" => ")[-1] for line in trace.splitlines()}
-    objc_runtimes = {path for path in loaded if Path(path).name.startswith("libobjc.so")}
-    if objc_runtimes != {str(runtime)}:
+    objc_runtimes = {Path(path).resolve(strict=True) for path in loaded
+                     if path.startswith("/") and Path(path).name.startswith("libobjc.so")}
+    if objc_runtimes != {runtime}:
         raise ValueError(f"The test did not load the instrumented runtime\n{trace}")
     return subprocess.run(command, env=environment).returncode
 
