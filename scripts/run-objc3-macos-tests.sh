@@ -60,7 +60,13 @@ if grep -Eq '/libobjc(\.[[:alnum:]]+)?\.dylib' "$OUT/load-paths.txt"; then
 fi
 cp "$MANIFEST" "$OUT/sdk.json"
 "$CLANG" --version | tee "$OUT/compiler.txt"
-DYLD_PRINT_LIBRARIES=1 "$BIN" "$@" 2>"$OUT/dyld.log" | tee "$OUT/results.txt"
+if DYLD_PRINT_LIBRARIES=1 "$BIN" "$@" 2>"$OUT/dyld.log" | tee "$OUT/results.txt"; then
+    :
+else
+    status=$?
+    tail -n 25 "$OUT/dyld.log" >&2
+    exit "$status"
+fi
 python3 - "$RUNTIME" "$OUT/dyld.log" <<'PY'
 import re
 import sys

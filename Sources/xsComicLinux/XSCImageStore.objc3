@@ -2490,24 +2490,22 @@ static void XSCStoreExecuteJob(__unsafe_unretained XSCImageStore *store, XSCDeco
     }
 
     XSCDecodedPage *decoded = nil;
-    @autoreleasepool {
-        XSCData *rawData = nil;
-        handle {
-            rawData = tryValue([job->_book readPageDataAtIndex:job->_index]);
-        } catch(XSCError *err) {
-            (void)err;
-            rawData = nil;
-        }
-        if (rawData) {
-            XSCDecodeResult res = XSCDecodePageDataResult(rawData);
-            match(res) {
-                case .Ok(let page): {
-                    decoded = page;
-                }
-                case .Err(let err): {
-                    (void)err;
-                    decoded = nil;
-                }
+    XSCData *rawData = nil;
+    handle {
+        rawData = tryValue([job->_book readPageDataAtIndex:job->_index]);
+    } catch(XSCError *err) {
+        (void)err;
+        rawData = nil;
+    }
+    if (rawData) {
+        XSCDecodeResult res = XSCDecodePageDataResult(rawData);
+        match(res) {
+            case .Ok(let page): {
+                decoded = page;
+            }
+            case .Err(let err): {
+                (void)err;
+                decoded = nil;
             }
         }
     }
@@ -2518,46 +2516,48 @@ static void XSCStoreExecuteJob(__unsafe_unretained XSCImageStore *store, XSCDeco
 static void *XSCDecodeWorkerMain(void *arg) {
     __unsafe_unretained XSCImageStore *store = (__bridge XSCImageStore *)arg;
     for (;;) {
-        XSCDecodeJob *job = nil;
-        bool isBgJob = false;
-        {
-            pthread_mutex_lock(&store->_poolLock);
-            defer { pthread_mutex_unlock(&store->_poolLock); }
+        // Completion handoff and ARC cleanup can autorelease after decoding.
+        @autoreleasepool {
+            XSCDecodeJob *job = nil;
+            bool isBgJob = false;
+            {
+                pthread_mutex_lock(&store->_poolLock);
+                defer { pthread_mutex_unlock(&store->_poolLock); }
 
-            for (;;) {
-                if (store->_poolShutdown) {
-                    return NULL;
+                for (;;) {
+                    if (store->_poolShutdown) {
+                        return NULL;
+                    }
+                    // Visible demand always takes precedence and can use all 4 lanes.
+                    if (store->_visHead) {
+                        job = store->_visHead;
+                        store->_visHead = job->_next;
+                        if (!store->_visHead) store->_visTail = nil;
+                        job->_next = nil;
+                        break;
+                    }
+                    // Background prefetch/prewarm is capped at 3 active lanes (1 lane reserved for visible demand).
+                    if (store->_bgHead && store->_activeBgCount < kXSCDecodeMaxBackgroundActive) {
+                        job = store->_bgHead;
+                        store->_bgHead = job->_next;
+                        if (!store->_bgHead) store->_bgTail = nil;
+                        job->_next = nil;
+                        store->_activeBgCount++;
+                        isBgJob = true;
+                        break;
+                    }
+                    pthread_cond_wait(&store->_poolCond, &store->_poolLock);
                 }
-                // Visible demand always takes precedence and can use all 4 lanes.
-                if (store->_visHead) {
-                    job = store->_visHead;
-                    store->_visHead = job->_next;
-                    if (!store->_visHead) store->_visTail = nil;
-                    job->_next = nil;
-                    isBgJob = false;
-                    break;
-                }
-                // Background prefetch/prewarm is capped at 3 active lanes (1 lane reserved for visible demand).
-                if (store->_bgHead && store->_activeBgCount < kXSCDecodeMaxBackgroundActive) {
-                    job = store->_bgHead;
-                    store->_bgHead = job->_next;
-                    if (!store->_bgHead) store->_bgTail = nil;
-                    job->_next = nil;
-                    store->_activeBgCount++;
-                    isBgJob = true;
-                    break;
-                }
-                pthread_cond_wait(&store->_poolCond, &store->_poolLock);
             }
-        }
 
-        XSCStoreExecuteJob(store, job);
+            XSCStoreExecuteJob(store, job);
 
-        if (isBgJob) {
-            pthread_mutex_lock(&store->_poolLock);
-            store->_activeBgCount--;
-            pthread_cond_signal(&store->_poolCond);
-            pthread_mutex_unlock(&store->_poolLock);
+            if (isBgJob) {
+                pthread_mutex_lock(&store->_poolLock);
+                store->_activeBgCount--;
+                pthread_cond_signal(&store->_poolCond);
+                pthread_mutex_unlock(&store->_poolLock);
+            }
         }
     }
 }

@@ -594,23 +594,23 @@ static XSCQueueItem *gBgTail = nil;
 static void *xsc_bg_worker_main(void *arg) {
     (void)arg;
     for (;;) {
-        XSCQueueItem *item = nil;
-        {
-            pthread_mutex_lock(&gBgMutex);
-            defer { pthread_mutex_unlock(&gBgMutex); }
-            while (!gBgHead && !gBgStop) {
-                pthread_cond_wait(&gBgCond, &gBgMutex);
+        @autoreleasepool {
+            XSCQueueItem *item = nil;
+            {
+                pthread_mutex_lock(&gBgMutex);
+                defer { pthread_mutex_unlock(&gBgMutex); }
+                while (!gBgHead && !gBgStop) {
+                    pthread_cond_wait(&gBgCond, &gBgMutex);
+                }
+                if (gBgStop && !gBgHead) {
+                    return NULL;
+                }
+                item = gBgHead;
+                gBgHead = item->_next;
+                if (!gBgHead) gBgTail = nil;
+                item->_next = nil;
             }
-            if (gBgStop && !gBgHead) {
-                return NULL;
-            }
-            item = gBgHead;
-            gBgHead = item->_next;
-            if (!gBgHead) gBgTail = nil;
-            item->_next = nil;
-        }
-        if (item && item->_block) {
-            @autoreleasepool {
+            if (item && item->_block) {
                 XSCVoidBlock blk = item->_block;
                 item->_block = nil;
                 blk();
