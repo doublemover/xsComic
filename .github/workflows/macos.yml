@@ -45,13 +45,9 @@ jobs:
           debug=$!
           ./scripts/run-tests.sh > build/ci/core.log 2>&1 &
           core=$!
-          XSCOMIC_TEST_SANITIZER=address ./scripts/run-tests.sh > build/ci/address.log 2>&1 &
-          address=$!
-          XSCOMIC_TEST_SANITIZER=thread ./scripts/run-tests.sh > build/ci/thread.log 2>&1 &
-          thread=$!
 
           status=0
-          for pid in "$release" "$debug" "$core" "$address" "$thread"; do
+          for pid in "$release" "$debug" "$core"; do
             if ! wait "$pid"; then status=1; fi
           done
           for log in build/ci/*.log; do

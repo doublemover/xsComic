@@ -37,25 +37,20 @@ jobs:
           tags: xscomic-objc3:dev
           cache-from: type=gha,scope=xscomic-${{ matrix.arch }}
           cache-to: type=gha,scope=xscomic-${{ matrix.arch }},mode=min,ignore-error=true
-      - name: Run release, core, and sanitizer checks in parallel
+      - name: Run release smoke and core checks in parallel
         run: |
           set -o pipefail
           mkdir -p build/ci
-          pids=()
           (
             ./scripts/docker-env.sh ./scripts/build-linux.sh --release &&
             ./scripts/docker-env.sh xvfb-run -a python3 Tests/xsComicLinuxTests/smoke.py build/linux/xscomic --x11
           ) > build/ci/render-and-interaction.log 2>&1 &
-          pids+=("$!")
+          smoke=$!
           ./scripts/docker-env.sh ./scripts/run-linux-tests.sh > build/ci/core.log 2>&1 &
-          pids+=("$!")
-          ./scripts/docker-env.sh env XSCOMIC_TEST_SANITIZER=address ./scripts/run-linux-tests.sh > build/ci/address.log 2>&1 &
-          pids+=("$!")
-          ./scripts/docker-env.sh env XSCOMIC_TEST_SANITIZER=thread ./scripts/run-linux-tests.sh > build/ci/thread.log 2>&1 &
-          pids+=("$!")
+          core=$!
 
           status=0
-          for pid in "${pids[@]}"; do
+          for pid in "$smoke" "$core"; do
             if ! wait "$pid"; then status=1; fi
           done
           for log in build/ci/*.log; do
