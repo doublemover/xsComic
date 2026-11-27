@@ -45,7 +45,7 @@ Compiles directly with `clang` against macOS system frameworks and libraries (`A
 
 ## Linux (Slopjective-C / Objective-C 3.0)
 
-Native **Objective-C 3.0, SDL2, and OpenGL 3.3 Core** port (`Sources/xsComicLinux/`, `Tests/xsComicLinuxTests/`) targeting Linux (`aarch64` / `x86_64`, verified on Debian 13), compiled with [**Slopjective-C**](https://github.com/doublemover/Slopjective-C) (`objc3c` `v0.1.0-preview.1`, patched Clang 23.1.5, GNUstep 2.2 ABI + `libobjc2`, zero GNUstep-Base).
+Native **Objective-C 3.0, SDL2, and OpenGL 3.3 Core** port (`Sources/xsComicLinux/`, `Tests/xsComicLinuxTests/`) targeting Linux (`aarch64` / `x86_64`, verified on Debian 13), compiled with [**Slopjective-C**](https://github.com/doublemover/Slopjective-C) (`objc3c` `v0.1.0-preview.2`, patched Clang 23.1.5, GNUstep 2.2 ABI + `libobjc2`, zero GNUstep-Base).
 
 ```sh
 # Build the stripped release binary (build/linux/xscomic)

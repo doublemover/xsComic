@@ -10,7 +10,7 @@ native macOS AppKit/Metal implementation, see [guide.md](guide.md).
 xsComic on Linux targets `aarch64-unknown-linux-gnu` and
 `x86_64-unknown-linux-gnu` (verified on Debian 13) and compiles directly with
 the official **Slopjective-C** (`doublemover/Slopjective-C`,
-`v0.1.0-preview.1`) **`objc3c`** compiler — patched LLVM/Clang 23.1.5 targeting
+`v0.1.0-preview.2`) **`objc3c`** compiler — patched LLVM/Clang 23.1.5 targeting
 the GNUstep 2.2 ABI and `libobjc2` (`libobjc.so.4.6`) with ARC and Blocks
 enabled.
 
