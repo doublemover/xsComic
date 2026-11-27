@@ -60,7 +60,7 @@ Native **Objective-C 3.0, SDL2, and OpenGL 3.3 Core** port (`Sources/xsComicLinu
 
 Compiles `.objc3` sources directly with `objc3c` (`-Oz -flto=thin -Wl,--gc-sections -Wl,--as-needed` + `strip`) against system Linux libraries (`zlib`, `libarchive`, `libjpeg-turbo`, `libpng`, `libwebp`, `giflib`, `libtiff`, `libavif`, `libheif`, `SDL2`, `SDL2_ttf`, OpenGL, `pthreads`). On Linux with `objc3c` (or `/opt/objc3c/activate.sh`) installed, all scripts run natively; on macOS or hosts without the SDK, they automatically build and delegate through [`scripts/docker-env.sh`](scripts/docker-env.sh) and [`docker/Dockerfile`](docker/Dockerfile).
 
-[Linux CI](.github/workflows/linux.yml) runs the core suite and the rendered-pixel and X11 smoke tests on x86-64 and AArch64. [macOS CI](.github/workflows/macos.yml) verifies the Apple Silicon AppKit bundles and runs the reader tests. It defaults to `macos-26`, with `macos-15` available via manual dispatch.
+[Linux CI](.github/workflows/linux.yml) runs the core suite and the rendered-pixel and X11 smoke tests on x86-64 and AArch64. [macOS CI](.github/workflows/macos.yml) verifies the Apple Silicon AppKit bundles and runs the reader tests on `macos-15` by default. Select `macos-26` when manually dispatching the workflow to test that host.
 
 To qualify the Objective-C 3 reader core on Apple Silicon, match Xcode to the installed experimental Darwin SDK and install the codec dependencies.
 
