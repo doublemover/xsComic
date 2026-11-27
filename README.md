@@ -71,6 +71,25 @@ XSCOMIC_OBJC3_SDK="/path/to/installed/Darwin SDK" ./scripts/run-objc3-macos-test
 
 The script retains the SDK identity, loader paths, build logs, and results in `build/objc3-macos-tests/`.
 
+### Objective-C 3 app on Apple Silicon
+
+With macOS 15 or later and the Xcode version required by your installed
+experimental Darwin SDK, build the SDL2/OpenGL reader as a native app bundle.
+Install the codec dependencies above and add `sdl2` and `sdl2_ttf`.
+
+```sh
+brew install sdl2 sdl2_ttf
+XSCOMIC_OBJC3_SDK="/path/to/installed/Darwin SDK" ./scripts/build-objc3-macos-app.sh
+ditto -x -k build/objc3-macos/release/xsComic-objc3-macos-arm64.zip build/objc3-macos/app
+open "build/objc3-macos/app/xsComic ObjC3.app"
+```
+
+Use Cmd+O to open a comic archive or image folder. The app archive contains
+its codec and window libraries. The reader links the owned Objective-C 3
+runtime statically, and a separate AppKit process presents the file picker.
+Slopjective-C's Apple Silicon qualification builds this archive from the
+installed SDK and runs the shared pixel checks on the unpacked app.
+
 The following benchmark snapshot used Preview 1 on Debian 13 AArch64. [`Metrics/linux-objc3.json`](Metrics/linux-objc3.json) records the exact source digest and environment.
 
 | Metric | Measured |
