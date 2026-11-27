@@ -61,6 +61,27 @@ def bundle(executable, brew):
     executable_rpaths = tuple(rpaths(executable))
     pending = deque([(executable, executable)])
     bundled = {}
+
+    def include(library, name):
+        destination = frameworks / name
+        prior = bundled.get(name)
+        if prior is None:
+            if run("lipo", "-archs", library).strip() != "arm64":
+                raise ValueError(f"{library} is not an arm64 Homebrew dylib")
+            shutil.copy2(library, destination)
+            destination.chmod(0o755)
+            bundled[name] = library
+            pending.append((library, destination))
+        elif prior != library:
+            raise ValueError(f"Conflicting library install names for {name}")
+        return destination
+
+    # Homebrew's SDL2 compatibility library opens SDL3 by name at runtime.
+    sdl3 = (brew / "opt/sdl3/lib/libSDL3.dylib").resolve(strict=True)
+    if not sdl3.is_relative_to(brew):
+        raise ValueError("SDL3 is outside the Homebrew prefix")
+    include(sdl3, "libSDL3.dylib")
+
     while pending:
         source, target = pending.popleft()
         # otool lists a dylib's own install name before its dependencies.
@@ -72,17 +93,7 @@ def bundle(executable, brew):
             if system_library(name):
                 continue
             library = resolve(name, source, executable, brew, executable_rpaths)
-            destination = frameworks / Path(name).name
-            prior = bundled.get(destination.name)
-            if prior is None:
-                if run("lipo", "-archs", library).strip() != "arm64":
-                    raise ValueError(f"{library} is not an arm64 Homebrew dylib")
-                shutil.copy2(library, destination)
-                destination.chmod(0o755)
-                bundled[destination.name] = library
-                pending.append((library, destination))
-            elif prior != library:
-                raise ValueError(f"Conflicting library install names for {destination.name}")
+            destination = include(library, Path(name).name)
             relative = "../Frameworks/" if target == executable else ""
             arguments += ["-change", name, f"@loader_path/{relative}{destination.name}"]
         for path in dict.fromkeys(rpaths(source)):
@@ -94,8 +105,8 @@ def bundle(executable, brew):
 def verify(executable):
     contents = executable.parent.parent
     libraries = sorted((contents / "Frameworks").glob("*.dylib"))
-    if not libraries:
-        raise ValueError("The application is missing its codec and window libraries")
+    if not any(library.name == "libSDL3.dylib" for library in libraries):
+        raise ValueError("The application is missing SDL3")
     for binary in [executable, *libraries]:
         if run("lipo", "-archs", binary).strip() != "arm64":
             raise ValueError(f"{binary} is not arm64")

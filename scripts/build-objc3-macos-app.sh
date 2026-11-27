@@ -23,7 +23,7 @@ fi
 SDK=$(cd "${XSCOMIC_OBJC3_SDK:?Set XSCOMIC_OBJC3_SDK to the installed Apple Silicon SDK.}" && pwd -P)
 COMPILER="$SDK/bin/objc3c"
 BREW_PREFIX=$(brew --prefix)
-FORMULAE=(libarchive jpeg-turbo libpng webp libtiff libavif libheif giflib sdl2 sdl2_ttf)
+FORMULAE=(libarchive jpeg-turbo libpng webp libtiff libavif libheif giflib sdl2-compat sdl2_ttf)
 for formula in "${FORMULAE[@]}"; do
     pc="$(brew --prefix "$formula")/lib/pkgconfig"
     PKG_CONFIG_PATH="$pc${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
@@ -33,7 +33,7 @@ PACKAGES=(libarchive libjpeg libpng libwebp libtiff-4 libavif libheif sdl2 SDL2_
 CFLAGS=$(pkg-config --cflags "${PACKAGES[@]}")
 LIBS=$(pkg-config --libs "${PACKAGES[@]}")
 GIF=$(brew --prefix giflib)
-SDL=$(brew --prefix sdl2)
+SDL=$(brew --prefix sdl2-compat)
 TTF=$(brew --prefix sdl2_ttf)
 "$COMPILER" --version
 
