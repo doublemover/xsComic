@@ -859,6 +859,12 @@ static void xscWalkDirectory(int dirFd,
     }
     defer { closedir(dir); }
 
+    int activeFd = dirfd(dir);
+    if (activeFd < 0) {
+        XSCError *err = xscMakeError(XSCArchiveErrorIOFailure, "The selected directory could not be read.");
+        throwError(err);
+    }
+
     struct dirent *ent = NULL;
     while ((ent = readdir(dir)) != NULL) {
         if ((++(*visitedCount) & 255u) == 0u && xscIsCancelled(cancelFlag)) {
@@ -875,7 +881,7 @@ static void xscWalkDirectory(int dirFd,
 
         if (dType == DT_UNKNOWN) {
             struct stat st;
-            if (fstatat(dirFd, name, &st, AT_SYMLINK_NOFOLLOW) != 0) continue;
+            if (fstatat(activeFd, name, &st, AT_SYMLINK_NOFOLLOW) != 0) continue;
             if (S_ISREG(st.st_mode)) {
                 dType = DT_REG;
             } else if (S_ISDIR(st.st_mode)) {
@@ -910,7 +916,7 @@ static void xscWalkDirectory(int dirFd,
             nextPref[relPrefixLen + nameLen] = '/';
             nextPref[nextPrefLen] = '\0';
 
-            int childFd = openat(dirFd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+            int childFd = openat(activeFd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
             if (childFd < 0) {
                 if (errno == ENOTDIR || errno == ELOOP || errno == ENOENT) continue;
                 XSCError *err = xscMakeError(XSCArchiveErrorIOFailure, "A subdirectory could not be read.");

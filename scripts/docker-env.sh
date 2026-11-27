@@ -86,6 +86,7 @@ if [[ $# -eq 0 ]]; then
 fi
 exec docker run --rm --init --user "$(id -u):$(id -g)" \
     -v "$REPO_ROOT:/work" \
+    -e HOME=/tmp \
     -e XDG_CONFIG_HOME=/work/build/docker-config \
     -e XSCOMIC_BUILD_LOCK_DIR=/work/build/.locks \
     -e XDG_CACHE_HOME=/tmp/xscomic-cache \

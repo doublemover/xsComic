@@ -6,8 +6,11 @@
       as `GL_R8` (1 byte/pixel) and expand `.rrr1` in the fragment shader; color
       pages upload as `GL_RGBA8` (4 bytes/pixel) with `GL_UNPACK_ROW_LENGTH`
       honoring page-aligned row strides.
-   2. Lazy mipmaps for large reductions and linear filtering at native size.
-      Associate alpha before filtering to keep hidden RGB out of page edges.
+   2. Hybrid decode-once, GPU-scale-always pipeline: 6x6 separable Lanczos-3
+      downscaling on the base level for normal reading reductions (1.05x-3x)
+      to preserve crisp manga screentones, lazy trilinear mipmaps above 3x to
+      prevent extreme-zoom aliasing, and linear filtering at native/upscale.
+      Color uploads premultiply alpha to keep hidden RGB out of filtered edges.
    3. Full EXIF 1..8 orientation transform in-shader and a 1 backing-pixel
       hairline page border without offscreen shadow surfaces.
    4. In-place multi-frame animated GIF frame playback via `tickAnimationAtMs:`.
@@ -81,8 +84,9 @@ static XSCString *xsc_unwrap_string(XSCOptString opt) {
    - Vertex shader emits 6 vertices via gl_VertexID using an empty VAO.
      uv=(0,0) maps to top-left (uRect.x, uRect.w) and uv=(1,1) to bottom-right
      (uRect.z, uRect.y), matching row-0-top decoded pixel memory layout.
-   - Fragment shader applies EXIF orientation, expands single-channel manga
-     pages, and draws a one-pixel inner border.
+   - Fragment shader applies EXIF orientation, hybrid Lanczos-3 (1.05x-3x)
+     and mipmapped (>3x) downscaling, .rrr1 expansion for GL_R8 manga pages,
+     and a one-pixel inner border.
  */
 static const char * const kXSCPageVertexShader =
     "#version 330 core\n"
@@ -103,6 +107,7 @@ static const char * const kXSCPageFragmentShader =
     "in vec2 vUV;\n"
     "out vec4 fragColor;\n"
     "uniform sampler2D uTex;\n"
+    "uniform vec2 uTexSize;\n"
     "uniform vec2 uDstSize;\n"
     "uniform int uOrientation;\n"
     "uniform int uIsGrayscale;\n"
@@ -118,8 +123,43 @@ static const char * const kXSCPageFragmentShader =
     "    return u;\n"
     "}\n"
     "\n"
+    "float l3(float x) {\n"
+    "    float a = abs(x);\n"
+    "    if (a < 1e-4) return 1.0;\n"
+    "    if (a >= 3.0) return 0.0;\n"
+    "    float p = 3.14159265 * a;\n"
+    "    float q = p / 3.0;\n"
+    "    return (sin(p) * sin(q)) / (p * q);\n"
+    "}\n"
+    "\n"
     "void main() {\n"
-    "    vec4 c = texture(uTex, ex(vUV, uOrientation));\n"
+    "    vec2 ru = ex(vUV, uOrientation);\n"
+    "    vec2 ot = (uOrientation >= 5 && uOrientation <= 8) ? uTexSize.yx : uTexSize;\n"
+    "    vec2 rt = ot / max(uDstSize, vec2(1.0));\n"
+    "    float maxRatio = max(rt.x, rt.y);\n"
+    "    vec4 c;\n"
+    "    if (maxRatio > 1.05 && maxRatio <= 3.0) {\n"
+    "        vec2 tx = 1.0 / max(uTexSize, vec2(1.0));\n"
+    "        vec2 rr = (uOrientation >= 5 && uOrientation <= 8) ? rt.yx : rt;\n"
+    "        vec2 st = tx * clamp(rr * 0.5, vec2(1.0), vec2(1.5));\n"
+    "        vec2 co = ru * uTexSize - 0.5;\n"
+    "        vec2 f = fract(co);\n"
+    "        vec2 b = (floor(co) + 0.5) * tx;\n"
+    "        vec4 a = vec4(0.0);\n"
+    "        float ws = 0.0;\n"
+    "        for (int j = -2; j <= 3; ++j) {\n"
+    "            float wy = l3(float(j) - f.y);\n"
+    "            for (int i = -2; i <= 3; ++i) {\n"
+    "                float w = l3(float(i) - f.x) * wy;\n"
+    "                a += textureLod(uTex, b + vec2(float(i), float(j)) * st, 0.0) * w;\n"
+    "                ws += w;\n"
+    "            }\n"
+    "        }\n"
+    "        c = clamp(a / max(ws, 1e-5), 0.0, 1.0);\n"
+    "        c.rgb = min(c.rgb, vec3(c.a));\n"
+    "    } else {\n"
+    "        c = texture(uTex, ru);\n"
+    "    }\n"
     "    if (uIsGrayscale != 0) {\n"
     "        c = vec4(c.r, c.r, c.r, 1.0);\n"
     "    }\n"
@@ -218,6 +258,7 @@ GLuint xsc_gl_build_program(const XSCGLProcs *gl,
 
     GLint _uRectLoc;
     GLint _uTexLoc;
+    GLint _uTexSizeLoc;
     GLint _uDstSizeLoc;
     GLint _uOrientationLoc;
     GLint _uIsGrayscaleLoc;
@@ -307,6 +348,7 @@ GLuint xsc_gl_build_program(const XSCGLProcs *gl,
     _vao = vao;
     _uRectLoc        = _gl.getUniformLocation(_program, "uRect");
     _uTexLoc         = _gl.getUniformLocation(_program, "uTex");
+    _uTexSizeLoc     = _gl.getUniformLocation(_program, "uTexSize");
     _uDstSizeLoc     = _gl.getUniformLocation(_program, "uDstSize");
     _uOrientationLoc = _gl.getUniformLocation(_program, "uOrientation");
     _uIsGrayscaleLoc = _gl.getUniformLocation(_program, "uIsGrayscale");
@@ -748,16 +790,20 @@ static bool xsc_prepare_rgba_upload(const uint8_t *pixels, size_t width, size_t 
     float ndcTop    = 1.0f - (rect.y / _viewport.height) * 2.0f;
     float ndcBottom = 1.0f - ((rect.y + rect.height) / _viewport.height) * 2.0f;
 
+    float dstW = rect.width * _backingScale;
+    float dstH = rect.height * _backingScale;
     _gl.uniform4f(_uRectLoc, ndcLeft, ndcBottom, ndcRight, ndcTop);
-    _gl.uniform2f(_uDstSizeLoc, rect.width * _backingScale, rect.height * _backingScale);
+    _gl.uniform2f(_uTexSizeLoc, (float)page.pixelWidth, (float)page.pixelHeight);
+    _gl.uniform2f(_uDstSizeLoc, dstW, dstH);
     _gl.uniform1i(_uOrientationLoc, (GLint)page.exifOrientation);
     _gl.uniform1i(_uIsGrayscaleLoc, slot->texIsGrayscale ? 1 : 0);
 
     _gl.activeTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, slot->texID);
     XSCSizeF pixels = page.orientedPixelSize;
-    if (slot->mipmapsDirty &&
-        (rect.width * _backingScale < pixels.width || rect.height * _backingScale < pixels.height)) {
+    float safeW = fmaxf(1.0f, dstW);
+    float safeH = fmaxf(1.0f, dstH);
+    if (slot->mipmapsDirty && (pixels.width / safeW > 2.95f || pixels.height / safeH > 2.95f)) {
         _gl.generateMipmap(GL_TEXTURE_2D);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
         slot->mipmapsDirty = false;

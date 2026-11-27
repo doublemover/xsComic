@@ -57,10 +57,27 @@ performs the build. Native builds also accept paths outside the checkout.
 
 Docker mounts an explicitly supplied book outside the checkout read-only and
 mounts the requested screenshot output directory. Set
-`XSCOMIC_LIBRARY_DIR=/path/to/comics` to browse a whole host library in the
-file picker, navigate adjacent volumes, or drop files from that library into
-the window. The library mount is read-only. Native interactive builds use
-`zenity` or `kdialog` for the Open dialog.
+`XSCOMIC_LIBRARY_DIR=/path/to/comics` to browse a whole host library, navigate
+adjacent volumes, or drop files from that library into the window. The library
+mount is read-only. Native interactive builds use `zenity` or `kdialog` for the
+Open dialog.
+
+### Experimental Darwin Objective-C 3 SDK qualification
+
+The core Objective-C 3 sources (`XSCBase`, `XSCArchive`, `XSCImageStore`,
+`XSCReaderModel`) also carry minimal `#if defined(__APPLE__)` runtime guards
+and a standalone qualification script for testing the experimental Slopjective-C
+Darwin SDK on Apple Silicon
+([`Slopjective-C #8340`](https://github.com/doublemover/Slopjective-C/issues/8340)):
+
+```sh
+brew install pkg-config libarchive jpeg-turbo libpng webp libtiff libavif libheif giflib
+XSCOMIC_OBJC3_SDK="/path/to/installed/Darwin SDK" ./scripts/run-objc3-macos-tests.sh
+```
+
+Build logs, SDK identity, library paths, and test output are saved under
+`build/objc3-macos-tests/`. For the native macOS desktop app, see
+[guide.md](guide.md).
 
 ## Supported formats
 
@@ -103,7 +120,7 @@ XSCReaderModel ──────────► XSCArchive (XSCBook)
   │                         L8 grayscale repack, 4-lane priority pthread pool
   ▼
 XSCGLCanvas
-  OpenGL 3.3 Core, GL_R8 / GL_RGBA8 textures, mipmapped minification & EXIF 1–8
+  OpenGL 3.3 Core, GL_R8 / GL_RGBA8 textures, hybrid Lanczos-3 + mipmap & EXIF 1–8
 
 XSCBase — XSCObject ARC root, XSCString, XSCData, XSCError <Error>, XSCIndexList,
           main-thread queue/timers, and background pthread pool
@@ -168,11 +185,12 @@ XSCBase — XSCObject ARC root, XSCString, XSCData, XSCError <Error>, XSCIndexLi
   honor 64-byte-aligned row strides.
 - Compiles an inline GLSL 330 Core shader once at startup using an empty VAO
   and `gl_VertexID` quads. The fragment shader performs EXIF 1–8 orientation
-  transforms, `.rrr1` grayscale swizzling, and a one-pixel border. The canvas
-  generates mipmaps when a texture first shrinks below native size and uses
-  trilinear minification. Native size and upscaling use linear filtering.
-  Color uploads use premultiplied alpha to keep transparent pixels from
-  tinting edges during filtering.
+  transforms, `.rrr1` grayscale swizzling, hybrid downscaling (6×6 separable
+  Lanczos-3 on level 0 for `1.05×–3×` reductions to keep manga screentones
+  crisp, switching to lazily generated trilinear mipmaps above `3×` to avoid
+  extreme-zoom aliasing, and linear sampling at native/upscale), and a
+  one-pixel border. Color uploads use premultiplied alpha to keep transparent
+  pixels from tinting edges during filtering.
 - Decode-once, GPU-scale-always: focal-point zooming (`0.1×`–`16×`), drag
   panning, resizing, and toggling the sidebar never re-decode images.
   A page keeps its texture and playback position when it moves to the other
@@ -239,30 +257,30 @@ build/linux/xscomic [options] [book_path]
   --screenshot PATH   Render frame, save PNG to PATH, and exit
 ```
 
-With a book path, `--screenshot` waits for the requested spread to render.
-Opening, decoding, and output errors return a nonzero status. With no book,
-it captures the empty reader. Invalid command-line arguments exit with status 2.
+With a book path, `--screenshot` waits up to 30 seconds for the requested spread.
+It writes the completed PNG using the caller’s `umask`. Opening, decoding,
+timeout, and output errors return a nonzero status. With no book, it captures
+the empty reader. Invalid command-line arguments exit with status 2.
 
 ## Measured footprint and benchmarks
 
-These figures describe the original Linux port, using the source digest in
-the measurement record. They predate the cache and image correctness changes.
-Measured on Debian 13.8 (`aarch64`, `objc3c` `v0.1.0-preview.1` / Clang 23.1.5,
+Measured on Debian 13 (`aarch64`, `objc3c` `v0.1.0-preview.1` / Clang 23.1.5,
 GNUstep 2.2 ABI, `-Oz -flto=thin -Wl,--gc-sections -Wl,--as-needed` + `strip`).
 Full section breakdown, sanitizers, and raw run samples are recorded in
 [`../Metrics/linux-objc3.json`](../Metrics/linux-objc3.json):
 
 | Metric | Measured |
 | --- | --- |
-| Stripped `build/linux/xscomic` | **284.0 KiB** (290,848 bytes; `text` 259,369 B, `data` 27,492 B, `bss` 5,032 B) |
-| Unstripped `build/linux/xscomic.symbols` | **441.1 KiB** (451,664 bytes) |
-| Debug `-O0 -g` binary | **873.6 KiB** (894,560 bytes) |
+| Stripped `build/linux/xscomic` | **289.3 KiB** (296,272 bytes; `text` 264,715 B, `data` 27,588 B, `bss` 8,000 B) |
+| Unstripped `build/linux/xscomic.symbols` | **447.1 KiB** (457,832 bytes) |
+| Debug `-O0 -g` binary | **888.7 KiB** (909,984 bytes) |
 | Direct dynamic dependencies (`readelf -d`) | **16** (`ldd -u -r`: 0 unused; zero GNUstep-Base) |
-| Standalone tests ([`Tests/xsComicLinuxTests/main.objc3`](../Tests/xsComicLinuxTests/main.objc3)) | **183 passed, 0 failed** (3/3 runs; ASan+UBSan+LSan & TSan 3/3 clean) |
-| 4,096-file directory scan (3 runs) | **1.13 ms** median (1.12 ms fastest) |
-| 128-page CBZ open (3 runs) | **0.035 ms** median (0.034 ms fastest) |
-| 500-page CBZ open (3 runs) | **0.075 ms** median (0.070 ms fastest) |
-| Cold 1024×1536 JPEG decode (3 runs) | **2.66 ms** median (2.63 ms fastest) |
-| Synchronous cache-hit lookup (10,000 hits, 3 runs) | **47.7 ns/call** median (47.5 ns/call fastest) |
-| Test process RSS (`/proc/self/statm`, 3 runs) | **42.80 MiB** median (42.68 MiB lowest) |
-| Cold launch-to-render, 10p 1024×1536 CBZ (1280×800, Mesa llvmpipe) | **105.10 ms** median direct on Xvfb (99.76 ms fastest) / **154.37 ms** via `xvfb-run` |
+| Standalone tests ([`Tests/xsComicLinuxTests/main.objc3`](../Tests/xsComicLinuxTests/main.objc3)) | **191 passed, 0 failed** (3/3 runs; ASan+UBSan+LSan & TSan 3/3 clean) |
+| E2E pixel & X11 smoke suite ([`Tests/xsComicLinuxTests/smoke.py`](../Tests/xsComicLinuxTests/smoke.py)) | All CLI, orientation, alpha-edge, Lanczos-3 / mipmap, GIF, picker, and jump checks passed |
+| 4,096-file directory scan (3 runs) | **1.16 ms** median (1.15 ms fastest) |
+| 128-page CBZ open (3 runs) | **0.024 ms** median (0.023 ms fastest) |
+| 500-page CBZ open (3 runs) | **0.062 ms** median (0.056 ms fastest) |
+| Cold 1024×1536 JPEG decode (3 runs) | **3.28 ms** median (2.97 ms fastest) |
+| Synchronous cache-hit lookup (10,000 hits, 3 runs) | **43.3 ns/call** median (42.3 ns/call fastest) |
+| Test process RSS (`/proc/self/statm`, 3 runs) | **42.64 MiB** median (42.64 MiB lowest) |
+| Cold launch-to-render, 10p 1024×1536 CBZ (1280×800, Mesa llvmpipe) | **97.23 ms** median direct on Xvfb (76.09 ms fastest) / **95.15 ms** via `xvfb-run` |
