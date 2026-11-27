@@ -24,15 +24,19 @@
 #include <SDL2/SDL_ttf.h>
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <locale.h>
 #include <math.h>
 #include <png.h>
 #include <setjmp.h>
+#include <signal.h>
+#include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #pragma mark - Constants & Theme Palette
@@ -239,9 +243,24 @@ static bool xsc_png_write_rows(png_structp png,
 
 static bool xsc_write_rgba_png(const char *path, int width, int height, const uint8_t *rgbaBottomUp) {
     if (!path || width <= 0 || height <= 0 || !rgbaBottomUp) return false;
-    FILE *fp = fopen(path, "wb");
-    if (!fp) return false;
-    defer { fclose(fp); }
+    const char *slash = strrchr(path, '/');
+    size_t directoryLength = slash ? (size_t)(slash - path) + 1u : 0u;
+    char tempPath[PATH_MAX];
+    if (directoryLength >= sizeof(tempPath)) return false;
+    int written = snprintf(tempPath, sizeof(tempPath), "%.*s.xscomic-screenshot-XXXXXX",
+                           (int)directoryLength, path);
+    if (written < 0 || (size_t)written >= sizeof(tempPath)) return false;
+
+    int fd = mkostemp(tempPath, O_CLOEXEC);
+    if (fd < 0) return false;
+    defer { unlink(tempPath); }
+
+    FILE *fp = fdopen(fd, "wb");
+    if (!fp) {
+        close(fd);
+        return false;
+    }
+    defer { if (fp) fclose(fp); }
 
     png_structp png = png_create_write_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
     if (!png) return false;
@@ -249,7 +268,10 @@ static bool xsc_write_rgba_png(const char *path, int width, int height, const ui
     defer { png_destroy_write_struct(&png, info ? &info : NULL); }
     if (!info) return false;
 
-    return xsc_png_write_rows(png, info, fp, width, height, rgbaBottomUp);
+    bool ok = xsc_png_write_rows(png, info, fp, width, height, rgbaBottomUp);
+    if (fclose(fp) != 0) ok = false;
+    fp = NULL;
+    return ok && rename(tempPath, path) == 0;
 }
 
 #pragma mark - OpenGL 3.3 2D Chrome & Typography Renderer
@@ -1122,61 +1144,68 @@ static void xsc_compute_layout(XSCLayout *L, float winW, float winH, bool showSi
     };
 }
 
-#pragma mark - Native File Dialog Helper (Off-Main)
+#pragma mark - Native File Dialog
 
-static bool xsc_has_command(const char *cmd) {
-    if (!cmd || cmd[0] == '\0') return false;
-    const char *pathEnv = getenv("PATH");
-    if (!pathEnv || pathEnv[0] == '\0') pathEnv = "/usr/bin:/bin";
-    size_t cmdLen = strlen(cmd);
-    const char *p = pathEnv;
-    while (*p != '\0') {
-        const char *colon = strchr(p, ':');
-        size_t dirLen = colon ? (size_t)(colon - p) : strlen(p);
-        if (dirLen > 0u && dirLen + 1u + cmdLen < PATH_MAX) {
-            char candidate[PATH_MAX];
-            memcpy(candidate, p, dirLen);
-            candidate[dirLen] = '/';
-            memcpy(candidate + dirLen + 1u, cmd, cmdLen + 1u);
-            if (access(candidate, X_OK) == 0) {
-                return true;
-            }
+extern char **environ;
+
+static int xsc_spawn_file_picker(pid_t *pid, int *readFd) {
+    int fds[2];
+    if (pipe2(fds, O_CLOEXEC) != 0) return errno;
+    defer {
+        if (fds[0] >= 0) close(fds[0]);
+        close(fds[1]);
+    }
+    if (fcntl(fds[0], F_SETFL, O_NONBLOCK) != 0) return errno;
+
+    posix_spawn_file_actions_t actions;
+    int rc = posix_spawn_file_actions_init(&actions);
+    if (rc != 0) return rc;
+    defer { posix_spawn_file_actions_destroy(&actions); }
+
+    rc = posix_spawn_file_actions_adddup2(&actions, fds[1], STDOUT_FILENO);
+    if (rc != 0) return rc;
+
+    const char *directory = getenv("XSCOMIC_HOST_LIBRARY_DIR") ? "/comics/" : "./";
+    char initialDirectory[32];
+    snprintf(initialDirectory, sizeof(initialDirectory), "--filename=%s", directory);
+    char *zenity[] = { "zenity", "--file-selection", "--title=Open Comic Book",
+        "--file-filter=Comic Archives | *.cbz *.cbr *.cb7 *.cbt *.zip *.rar *.7z *.tar",
+        "--file-filter=All Files | *", initialDirectory, NULL };
+    char *kdialog[] = { "kdialog", "--getopenfilename", (char *)directory,
+        "*.cbz *.cbr *.cb7 *.cbt *.zip *.rar *.7z *.tar|Comic Archives", NULL };
+    rc = posix_spawnp(pid, zenity[0], &actions, NULL, zenity, environ);
+    if (rc == ENOENT || rc == EACCES) {
+        rc = posix_spawnp(pid, kdialog[0], &actions, NULL, kdialog, environ);
+    }
+    if (rc == 0) {
+        *readFd = fds[0];
+        fds[0] = -1;
+    }
+    return rc;
+}
+
+static XSCString *xsc_map_dropped_path(const char *path) {
+    const char *hosts[] = { getenv("XSCOMIC_HOST_CHECKOUT"), getenv("XSCOMIC_HOST_LIBRARY_DIR") };
+    const char *containers[] = { "/work", "/comics" };
+    for (size_t i = 0u; i < sizeof(hosts) / sizeof(hosts[0]); i++) {
+        const char *prefix = hosts[i];
+        if (!prefix || !prefix[0]) continue;
+        size_t length = strlen(prefix);
+        if (length == 1u && prefix[0] == '/' && path[0] == '/') {
+            return [XSCString stringWithFormat:"%s%s", containers[i], path];
         }
-        if (!colon) break;
-        p = colon + 1;
+        if (strncmp(path, prefix, length) == 0 && (path[length] == '/' || path[length] == '\0')) {
+            return [XSCString stringWithFormat:"%s%s", containers[i], path + length];
+        }
     }
-    return false;
+    return [XSCString stringWithUTF8:path];
 }
 
-static XSCString *xsc_run_file_picker_blocking(bool *outHasTool) {
-    const char *cmd = NULL;
-    if (xsc_has_command("zenity")) {
-        cmd = "zenity --file-selection --title='Open Comic Book' "
-              "--file-filter='Comic Archives | *.cbz *.cbr *.cb7 *.cbt *.zip *.rar *.7z *.tar' "
-              "--file-filter='All Files | *' 2>/dev/null";
-    } else if (xsc_has_command("kdialog")) {
-        cmd = "kdialog --getopenfilename . '*.cbz *.cbr *.cb7 *.cbt *.zip *.rar *.7z *.tar|Comic Archives' 2>/dev/null";
-    } else {
-        if (outHasTool) *outHasTool = false;
-        return nil;
-    }
-    if (outHasTool) *outHasTool = true;
-
-    FILE *pipe = popen(cmd, "r");
-    if (!pipe) return nil;
-    defer { pclose(pipe); }
-
-    char buf[PATH_MAX];
-    if (!fgets(buf, (int)sizeof(buf), pipe)) {
-        return nil;
-    }
-    size_t len = strlen(buf);
-    while (len > 0u && (buf[len - 1u] == '\n' || buf[len - 1u] == '\r')) {
-        buf[--len] = '\0';
-    }
-    if (len == 0u) return nil;
-    return [XSCString stringWithBytes:buf length:len];
-}
+typedef enum {
+    XSCScreenshotWaiting,
+    XSCScreenshotReady,
+    XSCScreenshotFailed,
+} XSCScreenshotState;
 
 #pragma mark - Main App Controller
 
@@ -1195,9 +1224,6 @@ static void xsc_sdl_wakeup(void) {
 
 @property (nonatomic, readonly) bool shouldQuit;
 @property (nonatomic, readonly) bool needsRedraw;
-@property (nonatomic, readonly) bool isAnimatingGIF;
-@property (nonatomic, readonly) bool showJumpModal;
-@property (nonatomic, readonly) bool isModelLoading;
 
 - (instancetype)initWithWindow:(SDL_Window *)window
                          model:(XSCReaderModel *)model
@@ -1207,8 +1233,11 @@ static void xsc_sdl_wakeup(void) {
 
 - (void)handleSDLEvent:(const SDL_Event *)ev;
 - (void)tickAtMs:(uint64_t)nowMs;
+- (int)eventWaitAtMs:(uint64_t)nowMs;
 - (void)renderFrame;
-- (bool)isScreenshotReadyAtMs:(uint64_t)nowMs;
+- (XSCScreenshotState)screenshotState;
+- (XSCString *)screenshotError;
+- (void)closeFilePicker;
 - (bool)captureScreenshotToPath:(const char *)path;
 
 @end
@@ -1238,6 +1267,7 @@ static void xsc_sdl_wakeup(void) {
     size_t _jumpLen;
     bool _jumpSelectAll;
     bool _jumpInvalid;
+    bool _jumpCaretVisible;
     uint64_t _jumpBlinkOriginMs;
 
     bool _showSettings;
@@ -1252,7 +1282,10 @@ static void xsc_sdl_wakeup(void) {
     bool _isDraggingCanvas;
     float _lastDragX;
     float _lastDragY;
-    bool _fileDialogOpen;
+    pid_t _filePickerPID;
+    int _filePickerReadFd;
+    size_t _filePickerLength;
+    char _filePickerPath[PATH_MAX];
 
     // Zoom label cache
     char _zoomLabel[24];
@@ -1262,17 +1295,13 @@ static void xsc_sdl_wakeup(void) {
     bool _needsRedraw;
     bool _hasDisplayedPage;
     bool _hasDisplayedStatus;
-    bool _isAnimatingGIF;
     bool _cliPostOpenApplied;
     bool _waitingPostJump;
-    uint64_t _startMs;
+
 }
 
 - (bool)shouldQuit { return _shouldQuit; }
 - (bool)needsRedraw { return _needsRedraw; }
-- (bool)isAnimatingGIF { return _isAnimatingGIF; }
-- (bool)showJumpModal { return _showJumpModal; }
-- (bool)isModelLoading { return _model ? _model.isLoading : false; }
 
 - (instancetype)initWithWindow:(SDL_Window *)window
                          model:(XSCReaderModel *)model
@@ -1293,7 +1322,7 @@ static void xsc_sdl_wakeup(void) {
         _mouseX = -1.0f;
         _mouseY = -1.0f;
         _needsRedraw = true;
-        _startMs = (uint64_t)xsc_now_ms();
+        _filePickerReadFd = -1;
         snprintf(_zoomLabel, sizeof(_zoomLabel), "Fit");
 
         __weak XSCAppController *weakSelf = self;
@@ -1455,26 +1484,69 @@ static void xsc_sdl_wakeup(void) {
 }
 
 - (void)chooseBookInteractive {
-    if (_fileDialogOpen) return;
-    _fileDialogOpen = true;
-    __weak XSCAppController *weakSelf = self;
-    xsc_dispatch_bg(^{
-        bool hasTool = false;
-        XSCString *picked = xsc_run_file_picker_blocking(&hasTool);
-        xsc_dispatch_main(^{
-            XSCAppController *strongSelf = weakSelf;
-            if (!strongSelf) return;
-            strongSelf->_fileDialogOpen = false;
-            if (picked && picked.length > 0u) {
-                strongSelf->_errorBanner = nil;
-                [strongSelf->_model openPath:picked.utf8];
-            } else if (!hasTool) {
-                strongSelf->_errorBanner = [XSCString stringWithUTF8:
-                    "Install zenity or kdialog to browse files, or drag & drop a comic here."];
-                strongSelf->_needsRedraw = true;
-            }
-        });
-    });
+    if (_filePickerPID > 0) return;
+    int rc = xsc_spawn_file_picker(&_filePickerPID, &_filePickerReadFd);
+    if (rc != 0) {
+        _filePickerPID = 0;
+        _errorBanner = rc == ENOENT
+            ? [XSCString stringWithUTF8:"Install zenity or kdialog to browse files, or drag a comic here."]
+            : [XSCString stringWithFormat:"Could not open the file picker: %s", strerror(rc)];
+        _needsRedraw = true;
+    }
+}
+
+- (void)closeFilePicker {
+    if (_filePickerPID <= 0) return;
+    close(_filePickerReadFd);
+    (void)kill(_filePickerPID, SIGKILL);
+    while (waitpid(_filePickerPID, NULL, 0) < 0 && errno == EINTR) {}
+    _filePickerPID = 0;
+    _filePickerReadFd = -1;
+    _filePickerLength = 0u;
+}
+
+- (void)pollFilePicker {
+    if (_filePickerPID <= 0) return;
+    while (_filePickerLength < sizeof(_filePickerPath)) {
+        ssize_t n = read(_filePickerReadFd, _filePickerPath + _filePickerLength,
+                         sizeof(_filePickerPath) - _filePickerLength);
+        if (n > 0) {
+            _filePickerLength += (size_t)n;
+        } else if (n == 0) {
+            break;
+        } else if (errno != EINTR) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) return;
+            [self closeFilePicker];
+            return;
+        }
+    }
+    // At most PATH_MAX - 1 path bytes and the picker's trailing newline.
+    char extra;
+    if (_filePickerLength == sizeof(_filePickerPath)) {
+        ssize_t n = read(_filePickerReadFd, &extra, 1u);
+        if (n < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) return;
+        if (n != 0 || _filePickerPath[_filePickerLength - 1u] != '\n') {
+            [self closeFilePicker];
+            _errorBanner = [XSCString stringWithUTF8:"The selected path is too long."];
+            _needsRedraw = true;
+            return;
+        }
+    }
+
+    int status = 0;
+    pid_t pid = waitpid(_filePickerPID, &status, WNOHANG);
+    if (pid == 0 || (pid < 0 && errno == EINTR)) return;
+    close(_filePickerReadFd);
+    _filePickerPID = 0;
+    _filePickerReadFd = -1;
+    size_t length = _filePickerLength;
+    _filePickerLength = 0u;
+    if (pid < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0 || length == 0u) return;
+    if (_filePickerPath[length - 1u] == '\n') length--;
+    if (length == 0u || memchr(_filePickerPath, '\0', length)) return;
+    _filePickerPath[length] = '\0';
+    _errorBanner = nil;
+    [_model openPath:_filePickerPath];
 }
 
 - (void)toggleZoomFitActual {
@@ -1535,7 +1607,9 @@ static void xsc_sdl_wakeup(void) {
     // Apply CLI post-open overrides once the book finishes loading.
     if (book && !model.isLoading && !_cliPostOpenApplied) {
         _cliPostOpenApplied = true;
-        if (_opts.startPage > 1 && (size_t)_opts.startPage <= book.pageCount) {
+        if (_opts.startPage > 0 && (uint64_t)_opts.startPage > book.pageCount) {
+            _errorBanner = [XSCString stringWithUTF8:"The requested page is outside the book."];
+        } else if (_opts.startPage > 1) {
             _hasDisplayedPage = false;
             _hasDisplayedStatus = false;
             _waitingPostJump = true;
@@ -1560,7 +1634,6 @@ static void xsc_sdl_wakeup(void) {
        showEmptyCTA:(bool)showEmptyCTA
           isLoading:(bool)isLoading
          statusText:(XSCOptString)statusText {
-    (void)model;
     [_canvas displayLeftPage:leftPage
                    rightPage:rightPage
                 showEmptyCTA:showEmptyCTA
@@ -1572,29 +1645,11 @@ static void xsc_sdl_wakeup(void) {
     XSCString *st = xsc_unwrap_opt_string(statusText);
     bool hasStatus = (st != nil && st.length > 0u);
 
-    _hasDisplayedPage = (!isLoading && (hasLeft || hasRight));
-    _hasDisplayedStatus = (!isLoading && hasStatus);
+    bool hasCompleteSpread = hasLeft && (model.visualPageIndices.count < 2u || hasRight);
+    _hasDisplayedPage = !isLoading && hasCompleteSpread;
+    _hasDisplayedStatus = !isLoading && (hasStatus || ((hasLeft || hasRight) && !hasCompleteSpread));
     if (_waitingPostJump && !isLoading && (hasLeft || hasRight || hasStatus)) {
         _waitingPostJump = false;
-    }
-
-    // Track whether either visible page is an animated GIF so the loop paces at 60 Hz only when needed.
-    bool anim = false;
-    match(leftPage) {
-        case .Some(let p): { if (p && p.isAnimatedGIF && p.gifFrameCount > 1u) anim = true; }
-        case .None: {}
-    }
-    match(rightPage) {
-        case .Some(let p): { if (p && p.isAnimatedGIF && p.gifFrameCount > 1u) anim = true; }
-        case .None: {}
-    }
-    _isAnimatingGIF = anim;
-
-    // Re-apply CLI zoom once pages are present so pan clamping sees real page bounds.
-    if (_cliPostOpenApplied && _opts.startZoom > 0.0f && (hasLeft || hasRight)) {
-        if (_canvas.zoomMode != XSCZoomModeCustom || fabsf(_canvas.zoomScale - _opts.startZoom) > 1e-4f) {
-            [_canvas setCustomScale:_opts.startZoom];
-        }
     }
 
     _needsRedraw = true;
@@ -1878,12 +1933,10 @@ static void xsc_sdl_wakeup(void) {
 }
 
 - (void)handleMouseWheel:(const SDL_MouseWheelEvent *)wev {
-    if (_showJumpModal) return;
+    if (_showJumpModal || _showSettings) return;
 
-    int mx = 0, my = 0;
-    SDL_GetMouseState(&mx, &my);
-    float ptrX = (_mouseX >= 0.0f) ? _mouseX : (float)mx;
-    float ptrY = (_mouseY >= 0.0f) ? _mouseY : (float)my;
+    float ptrX = (float)wev->mouseX;
+    float ptrY = (float)wev->mouseY;
 
     float wx = wev->preciseX;
     float wy = wev->preciseY;
@@ -1928,6 +1981,7 @@ static void xsc_sdl_wakeup(void) {
                 || ev->window.event == SDL_WINDOWEVENT_RESIZED
                 || ev->window.event == SDL_WINDOWEVENT_EXPOSED
                 || ev->window.event == SDL_WINDOWEVENT_MAXIMIZED
+                || ev->window.event == SDL_WINDOWEVENT_DISPLAY_CHANGED
                 || ev->window.event == SDL_WINDOWEVENT_RESTORED) {
                 [self syncWindowMetrics];
                 _needsRedraw = true;
@@ -1990,43 +2044,74 @@ static void xsc_sdl_wakeup(void) {
             [self handleMouseWheel:&ev->wheel];
             break;
 
-        case SDL_MULTIGESTURE:
-            if (!_showJumpModal && fabsf(ev->mgesture.dDist) > 1e-4f) {
-                float gx = ev->mgesture.x * (float)_winW - _layout.canvas.x;
-                float gy = ev->mgesture.y * (float)_winH - _layout.canvas.y;
-                float factor = 1.0f + ev->mgesture.dDist * 4.0f;
-                [_canvas zoomAroundPointX:gx y:gy factor:factor];
+        case SDL_MULTIGESTURE: {
+            float x = ev->mgesture.x * (float)_winW;
+            float y = ev->mgesture.y * (float)_winH;
+            if (!_showJumpModal && !_showSettings && fabsf(ev->mgesture.dDist) > 1e-4f &&
+                xsc_pt_in_rect(x, y, _layout.canvas)) {
+                float factor = expf(fminf(1.0f, fmaxf(-1.0f, ev->mgesture.dDist * 4.0f)));
+                [_canvas zoomAroundPointX:x - _layout.canvas.x y:y - _layout.canvas.y factor:factor];
                 _needsRedraw = true;
             }
             break;
+        }
 
         case SDL_DROPFILE: {
             char *dropped = ev->drop.file;
             if (dropped) {
                 defer { SDL_free(dropped); }
                 if (dropped[0] != '\0') {
+                    [self closeFilePicker];
                     _errorBanner = nil;
-                    [_model openPath:dropped];
+                    XSCString *path = xsc_map_dropped_path(dropped);
+                    [_model openPath:path.utf8];
                 }
             }
             break;
         }
 
         default:
-            if (ev->type == gWakeupEventType) {
-                _needsRedraw = true;
-            }
             break;
     }
 }
 
+static const uint64_t kXSCCaretHalfPeriodMs = 530u;
+
 - (void)tickAtMs:(uint64_t)nowMs {
+    [self pollFilePicker];
     if (xsc_main_drain() > 0u) {
         _needsRedraw = true;
     }
     if ([_canvas tickAnimationAtMs:nowMs]) {
         _needsRedraw = true;
     }
+    if (_showJumpModal) {
+        uint64_t elapsed = nowMs >= _jumpBlinkOriginMs ? nowMs - _jumpBlinkOriginMs : 0u;
+        bool visible = (elapsed / kXSCCaretHalfPeriodMs) % 2u == 0u;
+        if (visible != _jumpCaretVisible) {
+            _jumpCaretVisible = visible;
+            _needsRedraw = true;
+        }
+    }
+}
+
+- (int)eventWaitAtMs:(uint64_t)nowMs {
+    // The main queue sends an SDL event. Only the picker pipe needs polling,
+    // with a slow fallback for an unavailable SDL wakeup event.
+    uint64_t wait = (_filePickerPID > 0 || gWakeupEventType == (Uint32)-1) ? 50u : 1000u;
+    uint64_t animation = [_canvas nextAnimationDeadlineMs];
+    uint64_t work = xsc_main_next_deadline_ms();
+    uint64_t deadline = work < animation ? work : animation;
+    uint64_t untilDeadline = deadline > nowMs ? deadline - nowMs : 0u;
+    if (untilDeadline < wait) wait = untilDeadline;
+    if (_showJumpModal) {
+        uint64_t elapsed = nowMs >= _jumpBlinkOriginMs ? nowMs - _jumpBlinkOriginMs : 0u;
+        bool visible = (elapsed / kXSCCaretHalfPeriodMs) % 2u == 0u;
+        if (visible != _jumpCaretVisible) return 0;
+        uint64_t untilBlink = kXSCCaretHalfPeriodMs - elapsed % kXSCCaretHalfPeriodMs;
+        if (untilBlink < wait) wait = untilBlink;
+    }
+    return (int)wait;
 }
 
 #pragma mark - Chrome & Overlay Rendering
@@ -2506,8 +2591,7 @@ static void xsc_sdl_wakeup(void) {
     }
 
     // Caret (blinks interactively, always crisp & visible on screenshot capture)
-    uint64_t elapsed = (uint64_t)xsc_now_ms() - _jumpBlinkOriginMs;
-    bool caretVisible = (_opts.screenshotPath != NULL) || (((elapsed / 530ULL) % 2ULL) == 0ULL);
+    bool caretVisible = (_opts.screenshotPath != NULL) || _jumpCaretVisible;
     if (caretVisible) {
         [ui drawRect:(XSCRectF){ textX + textW + 1.5f, L->jumpInput.y + 8.0f, 1.8f, L->jumpInput.height - 16.0f }
                 fill:kColAccent];
@@ -2572,31 +2656,22 @@ static void xsc_sdl_wakeup(void) {
 
 #pragma mark - Deterministic Screenshot Capture
 
-- (bool)isScreenshotReadyAtMs:(uint64_t)nowMs {
-    if (!_opts.screenshotPath) return false;
-    uint64_t elapsed = (nowMs >= _startMs) ? (nowMs - _startMs) : 0ULL;
+- (XSCScreenshotState)screenshotState {
+    if (!_opts.bookPath) return XSCScreenshotReady;
+    if (_model.isLoading) return XSCScreenshotWaiting;
+    if ([self screenshotError]) return XSCScreenshotFailed;
+    if (!_cliPostOpenApplied || _waitingPostJump) return XSCScreenshotWaiting;
+    return _hasDisplayedPage ? XSCScreenshotReady : XSCScreenshotWaiting;
+}
 
-    // Hard safety cap so broken/unreadable paths never hang automated capture.
-    if (elapsed >= 10000ULL) return true;
-
-    if (!_opts.bookPath || _opts.bookPath[0] == '\0') {
-        return elapsed >= 150ULL;
-    }
-
-    if (_model.isLoading) return false;
-    if (_errorBanner != nil && xsc_unwrap_book(_model.book) == nil) {
-        return elapsed >= 80ULL;
-    }
-    if (xsc_unwrap_book(_model.book) == nil) return false;
-    if (!_cliPostOpenApplied || _waitingPostJump) return false;
-
-    return _hasDisplayedPage || _hasDisplayedStatus;
+- (XSCString *)screenshotError {
+    if (_errorBanner) return _errorBanner;
+    return _hasDisplayedStatus ? [XSCString stringWithUTF8:"The requested page could not be decoded."] : nil;
 }
 
 - (bool)captureScreenshotToPath:(const char *)path {
     [self syncWindowMetrics];
     [self renderSceneToBackbuffer];
-    glFinish();
 
     size_t pixelBytes = (size_t)_drawableW * (size_t)_drawableH * 4u;
     uint8_t *pixels = (uint8_t *)malloc(pixelBytes);
@@ -2607,9 +2682,7 @@ static void xsc_sdl_wakeup(void) {
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
     glReadPixels(0, 0, _drawableW, _drawableH, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
 
-    bool ok = xsc_write_rgba_png(path, _drawableW, _drawableH, pixels);
-    SDL_GL_SwapWindow(_window);
-    return ok;
+    return xsc_write_rgba_png(path, _drawableW, _drawableH, pixels);
 }
 
 @end
@@ -2641,11 +2714,8 @@ static bool xsc_cli_match_val(const char *arg,
                               const char **outVal) {
     size_t flen = strlen(flag);
     if (strcmp(arg, flag) == 0) {
-        if (*idx + 1 < argc) {
-            *outVal = argv[++(*idx)];
-            return true;
-        }
-        return false;
+        *outVal = (*idx + 1 < argc && argv[*idx + 1][0] != '-') ? argv[++(*idx)] : "";
+        return true;
     }
     if (strncmp(arg, flag, flen) == 0 && arg[flen] == '=') {
         *outVal = arg + flen + 1;
@@ -2677,7 +2747,13 @@ static bool xsc_parse_size_arg(const char *val, int *outW, int *outH) {
     return true;
 }
 
-static bool xsc_parse_cli(int argc, char *argv[], XSCCLIOptions *opts) {
+typedef enum {
+    XSCCLIInvalid,
+    XSCCLIHelp,
+    XSCCLIRun,
+} XSCCLIResult;
+
+static XSCCLIResult xsc_parse_cli(int argc, char *argv[], XSCCLIOptions *opts) {
     memset(opts, 0, sizeof(*opts));
     opts->startMode = -1;
     opts->startDir = -1;
@@ -2690,14 +2766,18 @@ static bool xsc_parse_cli(int argc, char *argv[], XSCCLIOptions *opts) {
             continue;
         }
         if (positionalOnly) {
-            if (!opts->bookPath) opts->bookPath = arg;
-            continue;
+            if (!opts->bookPath && arg[0] != '\0') {
+                opts->bookPath = arg;
+                continue;
+            }
+            fprintf(stderr, "xscomic: expected a single nonempty book path\n");
+            return XSCCLIInvalid;
         }
 
         const char *val = NULL;
         if (strcmp(arg, "-h") == 0 || strcmp(arg, "--help") == 0) {
             xsc_print_usage();
-            return false;
+            return XSCCLIHelp;
         } else if (strcmp(arg, "--single") == 0) {
             opts->startMode = 0;
         } else if (strcmp(arg, "--double") == 0) {
@@ -2716,33 +2796,50 @@ static bool xsc_parse_cli(int argc, char *argv[], XSCCLIOptions *opts) {
             errno = 0;
             char *end = NULL;
             long long p = strtoll(val, &end, 10);
-            if (errno == 0 && end && end != val && *end == '\0' && p >= 1) {
-                opts->startPage = (int64_t)p;
+            if (errno != 0 || end == val || *end != '\0' || p < 1) {
+                fprintf(stderr, "xscomic: --page expects a positive integer\n");
+                return XSCCLIInvalid;
             }
+            opts->startPage = (int64_t)p;
         } else if (xsc_cli_match_val(arg, "--zoom", &i, argc, argv, &val)) {
             errno = 0;
             char *end = NULL;
             float z = strtof(val, &end);
-            if (errno == 0 && end && end != val && *end == '\0' && isfinite(z) && z > 0.0f) {
-                opts->startZoom = z;
+            if (errno != 0 || end == val || *end != '\0' || !isfinite(z) || z <= 0.0f) {
+                fprintf(stderr, "xscomic: --zoom expects a finite positive number\n");
+                return XSCCLIInvalid;
             }
+            opts->startZoom = z;
         } else if (xsc_cli_match_val(arg, "--size", &i, argc, argv, &val)
                    || xsc_cli_match_val(arg, "--window-size", &i, argc, argv, &val)) {
-            (void)xsc_parse_size_arg(val, &opts->startWidth, &opts->startHeight);
+            if (!xsc_parse_size_arg(val, &opts->startWidth, &opts->startHeight)) {
+                fprintf(stderr, "xscomic: --size expects a positive width and height (WxH)\n");
+                return XSCCLIInvalid;
+            }
         } else if (xsc_cli_match_val(arg, "--screenshot", &i, argc, argv, &val)) {
-            if (val[0] != '\0') opts->screenshotPath = val;
-        } else if (arg[0] != '-' && !opts->bookPath) {
+            if (val[0] == '\0' || opts->screenshotPath) {
+                fprintf(stderr, "xscomic: specify --screenshot once with an output path\n");
+                return XSCCLIInvalid;
+            }
+            opts->screenshotPath = val;
+        } else if (arg[0] != '-' && arg[0] != '\0' && !opts->bookPath) {
             opts->bookPath = arg;
+        } else {
+            fprintf(stderr, "xscomic: unexpected argument '%s' (see --help)\n", arg);
+            return XSCCLIInvalid;
         }
     }
-    return true;
+    if (opts->startPage > 0 && !opts->bookPath) {
+        fprintf(stderr, "xscomic: --page requires a book path\n");
+        return XSCCLIInvalid;
+    }
+    return XSCCLIRun;
 }
 
 int main(int argc, char *argv[]) {
     XSCCLIOptions opts;
-    if (!xsc_parse_cli(argc, argv, &opts)) {
-        return 0;
-    }
+    XSCCLIResult parsed = xsc_parse_cli(argc, argv, &opts);
+    if (parsed != XSCCLIRun) return parsed == XSCCLIHelp ? 0 : 2;
 
     // Enable UTF-8 LC_CTYPE (without touching LC_NUMERIC) so X11's
     // Xutf8TextListToTextProperty updates _NET_WM_NAME for non-ASCII titles.
@@ -2838,6 +2935,7 @@ int main(int argc, char *argv[]) {
             xsc_set_main_wakeup(NULL);
             SDL_StopTextInput();
             model.delegate = nil;
+            [model cancelBackgroundWork];
             canvas.onZoomChanged = nil;
             [model.imageStore shutdown];
             xsc_dispatch_bg_shutdown();
@@ -2851,44 +2949,40 @@ int main(int argc, char *argv[]) {
                                                                   canvas:canvas
                                                                       ui:ui
                                                                  options:&opts];
+        defer { [app closeFilePicker]; }
+        if (opts.screenshotPath) exitCode = 1;
 
         while (!app.shouldQuit) {
             uint64_t nowMs = (uint64_t)xsc_now_ms();
             [app tickAtMs:nowMs];
 
-            if (opts.screenshotPath && [app isScreenshotReadyAtMs:nowMs]) {
-                xsc_main_drain();
-                if (![app captureScreenshotToPath:opts.screenshotPath]) {
-                    fprintf(stderr, "xscomic: failed to write screenshot to %s\n", opts.screenshotPath);
-                    exitCode = 1;
+            if (opts.screenshotPath) {
+                XSCScreenshotState state = [app screenshotState];
+                if (state == XSCScreenshotFailed) {
+                    fprintf(stderr, "xscomic: %s\n", [app screenshotError].utf8);
+                    break;
                 }
-                break;
+                if (state == XSCScreenshotReady) {
+                    if ([app captureScreenshotToPath:opts.screenshotPath]) {
+                        exitCode = 0;
+                    } else {
+                        fprintf(stderr, "xscomic: failed to write screenshot to %s\n", opts.screenshotPath);
+                    }
+                    break;
+                }
             }
 
             if (app.needsRedraw) {
                 [app renderFrame];
             }
 
-            int waitMs = 100;
-            if (opts.screenshotPath) {
-                waitMs = 10;
-            } else if (app.isAnimatingGIF) {
-                waitMs = 16;
-            } else if (app.isModelLoading) {
-                waitMs = 20;
-            } else if (app.showJumpModal) {
-                waitMs = 250;
-            }
-
+            int waitMs = [app eventWaitAtMs:(uint64_t)xsc_now_ms()];
             SDL_Event ev;
             if (SDL_WaitEventTimeout(&ev, waitMs)) {
                 [app handleSDLEvent:&ev];
                 while (!app.shouldQuit && SDL_PollEvent(&ev)) {
                     [app handleSDLEvent:&ev];
                 }
-            } else if (app.showJumpModal) {
-                // Periodic caret blink wakeup.
-                [app renderFrame];
             }
         }
     }

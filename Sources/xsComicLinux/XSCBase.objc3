@@ -17,7 +17,11 @@
 @implementation XSCObject
 
 + (instancetype)alloc {
+#if defined(__APPLE__)
+    return (__bridge_transfer id)objc3_darwin_allocate_v1((__bridge const objc3_darwin_class *)self);
+#else
     return class_createInstance(self, 0);
+#endif
 }
 
 + (instancetype)new {
@@ -29,7 +33,9 @@
 }
 
 - (void)dealloc {
+#if !defined(__APPLE__)
     object_dispose(self);
+#endif
 }
 
 @end
@@ -370,14 +376,19 @@ double xsc_now_ms(void) {
 static pthread_t gMainThread;
 static _Atomic(bool) gMainThreadMarked = false;
 static pthread_mutex_t gMainMutex = PTHREAD_MUTEX_INITIALIZER;
+#if defined(__APPLE__)
 static pthread_cond_t gMainCond = PTHREAD_COND_INITIALIZER;
+#else
+static pthread_cond_t gMainCond;
 static bool gMainCondInit = false;
+#endif
 static XSCQueueItem *gMainHead = nil;
 static XSCQueueItem *gMainTail = nil;
 static XSCQueueItem *gTimerHead = nil;
 static void (*gMainWakeupFn)(void) = NULL;
 
 static void xsc_ensure_main_cond_locked(void) {
+#if !defined(__APPLE__)
     if (gMainCondInit) return;
     pthread_condattr_t attr;
     pthread_condattr_init(&attr);
@@ -385,6 +396,7 @@ static void xsc_ensure_main_cond_locked(void) {
     pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
     pthread_cond_init(&gMainCond, &attr);
     gMainCondInit = true;
+#endif
 }
 
 void xsc_mark_main_thread(void) {
@@ -522,6 +534,15 @@ size_t xsc_main_drain(void) {
     return ran;
 }
 
+uint64_t xsc_main_next_deadline_ms(void) {
+    pthread_mutex_lock(&gMainMutex);
+    defer { pthread_mutex_unlock(&gMainMutex); }
+    if (gMainHead) return 0u;
+    if (!gTimerHead) return UINT64_MAX;
+    uint64_t due = gTimerHead->_dueNs;
+    return due / 1000000u + (due % 1000000u != 0u);
+}
+
 bool xsc_main_wait_ms(uint64_t timeout_ms) {
     if (xsc_main_drain() > 0u) return true;
     uint64_t startNs = xsc_now_ns();
@@ -539,10 +560,19 @@ bool xsc_main_wait_ms(uint64_t timeout_ms) {
             }
             uint64_t now = xsc_now_ns();
             if (waitUntil > now) {
+#if defined(__APPLE__)
+                uint64_t remaining = waitUntil - now;
+                struct timespec relative = {
+                    .tv_sec = (time_t)(remaining / 1000000000ULL),
+                    .tv_nsec = (long)(remaining % 1000000000ULL),
+                };
+                pthread_cond_timedwait_relative_np(&gMainCond, &gMainMutex, &relative);
+#else
                 struct timespec ts;
                 ts.tv_sec = (time_t)(waitUntil / 1000000000ULL);
                 ts.tv_nsec = (long)(waitUntil % 1000000000ULL);
                 pthread_cond_timedwait(&gMainCond, &gMainMutex, &ts);
+#endif
             }
         }
     }
@@ -564,23 +594,23 @@ static XSCQueueItem *gBgTail = nil;
 static void *xsc_bg_worker_main(void *arg) {
     (void)arg;
     for (;;) {
-        XSCQueueItem *item = nil;
-        {
-            pthread_mutex_lock(&gBgMutex);
-            defer { pthread_mutex_unlock(&gBgMutex); }
-            while (!gBgHead && !gBgStop) {
-                pthread_cond_wait(&gBgCond, &gBgMutex);
+        @autoreleasepool {
+            XSCQueueItem *item = nil;
+            {
+                pthread_mutex_lock(&gBgMutex);
+                defer { pthread_mutex_unlock(&gBgMutex); }
+                while (!gBgHead && !gBgStop) {
+                    pthread_cond_wait(&gBgCond, &gBgMutex);
+                }
+                if (gBgStop && !gBgHead) {
+                    return NULL;
+                }
+                item = gBgHead;
+                gBgHead = item->_next;
+                if (!gBgHead) gBgTail = nil;
+                item->_next = nil;
             }
-            if (gBgStop && !gBgHead) {
-                return NULL;
-            }
-            item = gBgHead;
-            gBgHead = item->_next;
-            if (!gBgHead) gBgTail = nil;
-            item->_next = nil;
-        }
-        if (item && item->_block) {
-            @autoreleasepool {
+            if (item && item->_block) {
                 XSCVoidBlock blk = item->_block;
                 item->_block = nil;
                 blk();

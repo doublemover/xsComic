@@ -10,7 +10,7 @@ native macOS AppKit/Metal implementation, see [guide.md](guide.md).
 xsComic on Linux targets `aarch64-unknown-linux-gnu` and
 `x86_64-unknown-linux-gnu` (verified on Debian 13) and compiles directly with
 the official **Slopjective-C** (`doublemover/Slopjective-C`,
-`v0.1.0-preview.1`) **`objc3c`** compiler — patched LLVM/Clang 23.1.5 targeting
+`v0.1.0-preview.2`) **`objc3c`** compiler — patched LLVM/Clang 23.1.5 targeting
 the GNUstep 2.2 ABI and `libobjc2` (`libobjc.so.4.6`) with ARC and Blocks
 enabled.
 
@@ -36,8 +36,11 @@ Objective-C 3.0 throughout:
 # Unoptimized debug binary (-O0 -g) -> build/linux/xscomic
 ./scripts/build-linux.sh --debug
 
-# Standalone 183-assertion test and benchmark suite (Tests/xsComicLinuxTests/main.objc3)
+# Standalone core test and benchmark suite
 ./scripts/run-linux-tests.sh
+
+# Check the built release with Mesa, Xvfb, and ordinary synthetic comic pages
+xvfb-run -a python3 Tests/xsComicLinuxTests/smoke.py build/linux/xscomic --x11
 
 # Build and launch interactively (X11/Wayland) or headlessly (--screenshot)
 ./scripts/build-and-run-linux.sh [args...]
@@ -47,9 +50,17 @@ All Linux scripts run natively when `objc3c` (or `/opt/objc3c/activate.sh`) is
 present on Linux, and automatically delegate through
 [`../scripts/docker-env.sh`](../scripts/docker-env.sh) and
 [`../docker/Dockerfile`](../docker/Dockerfile) (`xscomic-objc3:dev`) on macOS
-or hosts without the SDK. Outputs use `build/linux/`, `build/objc3/`, and
-`build/linux-tests/`, completely disjoint from the macOS `build/product/` and
-`build/clang/` trees.
+or hosts without the SDK. The image runs as the invoking UID and GID and saves
+preferences to `build/docker-config/`. Build inputs and outputs specified by
+`CBR_SCRATCH_PATH` and `CBR_OUTPUT_DIR` live under the checkout when Docker
+performs the build. Native builds also accept paths outside the checkout.
+
+Docker mounts an explicitly supplied book outside the checkout read-only and
+mounts the requested screenshot output directory. Set
+`XSCOMIC_LIBRARY_DIR=/path/to/comics` to browse a whole host library in the
+file picker, navigate adjacent volumes, or drop files from that library into
+the window. The library mount is read-only. Native interactive builds use
+`zenity` or `kdialog` for the Open dialog.
 
 ## Supported formats
 
@@ -59,7 +70,7 @@ or hosts without the SDK. Outputs use `build/linux/`, `build/objc3/`, and
 | tar | `.cbt`, `.tar` | `pread(2)` ustar / PAX / GNU LongName offset scan (fallback to `libarchive` if needed) |
 | RAR | `.cbr`, `.rar` | in-process `libarchive` (`-larchive`) |
 | 7-Zip | `.cb7`, `.7z` | in-process `libarchive` (`-larchive`) |
-| Folder | any directory | POSIX `opendir` / `readdir` |
+| Folder | any directory | POSIX `fdopendir` / `openat` |
 
 Image extensions: `.avif`, `.bmp`, `.gif`, `.heic`, `.heif`, `.jpeg`, `.jpg`,
 `.png`, `.tif`, `.tiff`, `.webp`. Decoding runs directly against native Linux
@@ -88,11 +99,11 @@ XSCReaderModel ──────────► XSCArchive (XSCBook)
   │ spreads, pre-warming    libarchive CBR/CB7, POSIX directory scan
   │
   ├──────────────────────► XSCImageStore (XSCDecodedPage)
-  │                         pthread_mutex hash cache, mmap + MADV_FREE,
+  │                         pthread_mutex hash cache, page-owned mmap,
   │                         L8 grayscale repack, 4-lane priority pthread pool
   ▼
 XSCGLCanvas
-  OpenGL 3.3 Core, GL_R8 / GL_RGBA8 textures, inline GLSL 330 Lanczos-3 & EXIF 1–8
+  OpenGL 3.3 Core, GL_R8 / GL_RGBA8 textures, mipmapped minification & EXIF 1–8
 
 XSCBase — XSCObject ARC root, XSCString, XSCData, XSCError <Error>, XSCIndexList,
           main-thread queue/timers, and background pthread pool
@@ -114,50 +125,38 @@ XSCBase — XSCObject ARC root, XSCString, XSCData, XSCError <Error>, XSCIndexLi
 
 ### `XSCArchive` ([`XSCArchive.h`](../Sources/xsComicLinux/XSCArchive.h), [`XSCArchive.objc3`](../Sources/xsComicLinux/XSCArchive.objc3))
 
-- **CBZ/ZIP & CBT/tar**: Opened with `O_RDONLY | O_NONBLOCK`, verified with
-  `fstat` (`S_ISREG`), and read via stateless `pread(2)` rather than `mmap` so
-  an unplugged drive or dropped network mount returns `EIO` instead of raising
-  `SIGBUS`. STORE entries read straight from disk; DEFLATE entries inflate via
-  `zlib` raw-DEFLATE (`inflateInit2(..., -MAX_WBITS)`) with strict size bounds
-  (256 MiB per page, 64 MiB Central Directory, 100,000 entries max) and a
-  1-byte overflow sentinel to defeat zip bombs. Supports Zip64 and
-  ustar/PAX/GNU LongName TAR headers with zero temporary files written.
-- **CBR/RAR & CB7/7z**: Streamed in-process via `libarchive`, switching only
-  the calling thread to a UTF-8 `LC_CTYPE` locale via `uselocale()` + `defer`
-  so Unicode entry names decode cleanly under the default `"C"` locale.
-  Payloads stay in memory up to 256 MiB and spill overflow pages to a private
-  per-process directory (`/tmp/xsComic-XXXXXX`, cleaned on error via `defer`,
-  on book `-dealloc`, and on exit via `atexit(3)`).
-- **Directories & adjacent volumes**: Walked with `opendir`/`readdir`
-  (`d_type`, falling back to `lstat` on `DT_UNKNOWN`, max depth 64), packing
-  all relative paths into a single flat UTF-8 byte arena and opening leaf files
-  component-by-component with `O_NOFOLLOW`. `adjacentVolumePathFor:step:cancelFlag:`
-  locates the next or previous readable sibling archive or image folder in
-  natural order.
+- **CBZ/ZIP & CBT/tar** use an open file descriptor and `pread(2)`.
+  ZIP reads verify CRC-32 for both STORE and DEFLATE, including empty entries.
+  Raw DEFLATE output and ZIP index sizes are bounded before allocating.
+  The native ZIP and tar paths support Zip64 and ustar/PAX/GNU LongName
+  respectively, without extracting page files to disk.
+- **libarchive fallback** reads RAR, 7-Zip, and alternate ZIP and tar formats.
+  It checks an opened regular file and switches only the calling thread to
+  a UTF-8 locale. Each book may hold up to 256 MiB of archive payload buffers
+  in memory. Larger pages spill to private temporary storage, capped at
+  2 GiB per book. The process-wide cap is 4 GiB or half the available
+  temporary filesystem space at the first spill, whichever is lower. The
+  spill directory uses an absolute `TMPDIR` when set, otherwise `/tmp`.
+  Closing the book, cancellation, and errors release its spill storage.
+- **Directories & adjacent volumes** use a retained directory descriptor for
+  indexing and reads. Page names are stored relative to that descriptor.
+  Traversal uses `openat` with `O_NOFOLLOW` for child directory and file
+  components. Adjacent-volume discovery checks readable siblings in natural order.
 
 ### `XSCImageStore` ([`XSCImageStore.h`](../Sources/xsComicLinux/XSCImageStore.h), [`XSCImageStore.objc3`](../Sources/xsComicLinux/XSCImageStore.objc3))
 
-- **Bounded cache & zero-hop fast path**: Default hard limits of 12 entries and
-  64 MiB logical bytes, with retention-aware LRU eviction, in-flight request
-  coalescing (promoting queued prefetches to visible demand on page turns), and
-  a bounded negative cache. `cachedPageForBook:index:` acquires a
-  `pthread_mutex_t`, probes a compact open-addressed C hash table (47.7 ns/call
-  median on arm64), pins the page non-volatile, and returns
-  `Optional(XSCDecodedPage *)` synchronously with zero thread hops.
-- **Native codecs & EXIF**: Decodes via `libjpeg-turbo` (`JCS_GRAYSCALE` and
-  `JCS_EXT_RGBA`), `libpng`, `libwebp`, `giflib` (static and full multi-frame
-  composited animated GIFs with per-frame delays), `libtiff` (in-memory
-  `TIFFClientOpen`), `libavif`, `libheif`, and a built-in 24/32-bit BMP
-  decoder. Parses EXIF 1–8 orientation tags and enforces a 16,384 px texture
-  dimension cap.
-- **4× grayscale RAM savings & purgeable memory**: Monochrome JPEG/PNG pages
-  decode straight into 8-bit `L8` buffers. Static `RGBA8` pages run a 32×32
-  chroma probe (`A >= 253`, `|R-G| <= 2`, `|G-B| <= 2`) and repack visually
-  grayscale manga to `L8` while immediately `munmap`-ing the 4× larger `RGBA8`
-  buffer. Pixel buffers live in page-aligned anonymous
-  `mmap(MAP_PRIVATE | MAP_ANONYMOUS)` allocations with 64-byte row alignment;
-  off-screen cached pages are marked volatile via `madvise(MADV_FREE)` so Linux
-  can reclaim them under memory pressure without swapping.
+- **Bounded cache and synchronous hits** use a lock-protected hash table,
+  retention-aware LRU eviction, in-flight request coalescing, and a bounded
+  negative cache. The cache holds up to 12 entries and 64 MiB of decoded
+  bytes by default. A decoded page owns its pixel mapping for as long as a
+  caller or the cache retains it, including its use by the canvas.
+- **Native codecs and EXIF** cover JPEG, PNG, WebP, GIF, TIFF, AVIF, HEIF,
+  and 24/32-bit BMP. Animated GIFs retain composited frames and honor the
+  encoded frame timing and repeat count. TIFF keeps the source orientation for
+  the canvas and converts libtiff's associated alpha to straight alpha.
+- **Grayscale** JPEG and opaque grayscale PNG decode directly to 8-bit L8.
+  Other static pages use L8 only if every decoded pixel is opaque and has
+  identical red, green, and blue channels. Pixel rows are 64-byte aligned.
 - **Concurrency**: 4-lane priority pthread decode pool capping background
   prefetch/pre-warm work at 3 active lanes so 1 lane is always reserved for
   visible demand.
@@ -169,13 +168,16 @@ XSCBase — XSCObject ARC root, XSCString, XSCData, XSCError <Error>, XSCIndexLi
   honor 64-byte-aligned row strides.
 - Compiles an inline GLSL 330 Core shader once at startup using an empty VAO
   and `gl_VertexID` quads. The fragment shader performs EXIF 1–8 orientation
-  transforms, 6×6 separable Lanczos-3 downscaling whenever the downscale ratio
-  exceeds `1.05×` (switching to linear sampling for upscaling or 1:1), `.rrr1`
-  grayscale swizzling for `GL_R8` textures, and a 1 backing-pixel hairline
-  border.
+  transforms, `.rrr1` grayscale swizzling, and a one-pixel border. The canvas
+  generates mipmaps when a texture first shrinks below native size and uses
+  trilinear minification. Native size and upscaling use linear filtering.
+  Color uploads use premultiplied alpha to keep transparent pixels from
+  tinting edges during filtering.
 - Decode-once, GPU-scale-always: focal-point zooming (`0.1×`–`16×`), drag
   panning, resizing, and toggling the sidebar never re-decode images.
-  Multi-frame animated GIFs advance in-place via `tickAnimationAtMs:`.
+  A page keeps its texture and playback position when it moves to the other
+  side of a spread. GIF playback schedules actual frame deadlines and skips
+  missed frames without slowing the animation.
 
 ### `XSCReaderModel` & desktop shell ([`XSCReaderModel.h`](../Sources/xsComicLinux/XSCReaderModel.h), [`XSCReaderModel.objc3`](../Sources/xsComicLinux/XSCReaderModel.objc3), [`main.objc3`](../Sources/xsComicLinux/main.objc3))
 
@@ -191,8 +193,8 @@ XSCBase — XSCObject ARC root, XSCString, XSCData, XSCError <Error>, XSCIndexLi
   crossing volumes swaps seamlessly.
 - **Desktop shell (`main.objc3`)**: Single-process SDL2 + OpenGL 3.3 Core +
   `SDL2_ttf` (DejaVu Sans / Liberation Sans) reactive event loop using
-  `SDL_WaitEventTimeout` woken instantaneously by a registered SDL user event
-  from `xsc_set_main_wakeup` (zero busy-wait). Draws dark-chrome UI elements
+  `SDL_WaitEventTimeout`, a user event for queued main-thread work, and deadlines
+  for timers, GIFs, and the text caret. Draws dark-chrome UI elements
   via an inline SDF rounded-rectangle shader and an LRU glyph texture cache:
   top toolbar, collapsible 180 px page sidebar, empty-state CTA card, direct
   Jump-to-Page modal, settings popover persisted to
@@ -237,8 +239,14 @@ build/linux/xscomic [options] [book_path]
   --screenshot PATH   Render frame, save PNG to PATH, and exit
 ```
 
+With a book path, `--screenshot` waits for the requested spread to render.
+Opening, decoding, and output errors return a nonzero status. With no book,
+it captures the empty reader. Invalid command-line arguments exit with status 2.
+
 ## Measured footprint and benchmarks
 
+These figures describe the original Linux port, using the source digest in
+the measurement record. They predate the cache and image correctness changes.
 Measured on Debian 13.8 (`aarch64`, `objc3c` `v0.1.0-preview.1` / Clang 23.1.5,
 GNUstep 2.2 ABI, `-Oz -flto=thin -Wl,--gc-sections -Wl,--as-needed` + `strip`).
 Full section breakdown, sanitizers, and raw run samples are recorded in

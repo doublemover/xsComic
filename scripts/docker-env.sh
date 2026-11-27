@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 set -eu
 
 # Build (if missing) the xscomic-objc3:dev Docker image and run commands inside
@@ -14,6 +14,7 @@ usage() {
 Usage: $(basename -- "$0") [--build] [--] [command [args...]]
 
 Options:
+  --run-arg ARG  Append a Docker run argument before the image. Repeat as needed.
   --build     (Re)build ${IMAGE} from docker/Dockerfile before running.
               If no command is given, exits after building.
   -h, --help  Show this help message.
@@ -30,11 +31,20 @@ EOF
 }
 
 FORCE_BUILD=0
+RUN_ARGS=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --build)
             FORCE_BUILD=1
             shift
+            ;;
+        --run-arg)
+            if [[ $# -lt 2 ]]; then
+                echo "Missing docker run argument" >&2
+                exit 2
+            fi
+            RUN_ARGS+=("$2")
+            shift 2
             ;;
         -h|--help)
             usage
@@ -66,23 +76,18 @@ elif ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
     build_image
 fi
 
-TTY_FLAGS=""
-if [ -t 0 ] && [ -t 1 ]; then
-    TTY_FLAGS="-it"
+if [[ -t 0 && -t 1 ]]; then
+    RUN_ARGS+=(-it)
 fi
-
-if [ $# -eq 0 ]; then
-    # shellcheck disable=SC2086
-    exec docker run --rm --init $TTY_FLAGS \
-        -v "$REPO_ROOT:/work" \
-        -w /work \
-        "$IMAGE" \
-        bash -l
+CONFIG_DIR="$REPO_ROOT/build/docker-config"
+mkdir -p "$CONFIG_DIR"
+if [[ $# -eq 0 ]]; then
+    set -- bash -l
 fi
-
-# shellcheck disable=SC2086
-exec docker run --rm --init $TTY_FLAGS \
+exec docker run --rm --init --user "$(id -u):$(id -g)" \
     -v "$REPO_ROOT:/work" \
-    -w /work \
-    "$IMAGE" \
-    "$@"
+    -e XDG_CONFIG_HOME=/work/build/docker-config \
+    -e XSCOMIC_BUILD_LOCK_DIR=/work/build/.locks \
+    -e XDG_CACHE_HOME=/tmp/xscomic-cache \
+    -e XDG_DATA_HOME=/tmp/xscomic-data \
+    -w /work ${RUN_ARGS[@]+"${RUN_ARGS[@]}"} "$IMAGE" "$@"

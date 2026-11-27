@@ -21,6 +21,9 @@ typedef enum XSCPageTurnKey {
 
 @class XSCReaderModel;
 
+#if defined(__APPLE__)
+__attribute__((objc_non_runtime_protocol))
+#endif
 @protocol XSCReaderModelDelegate
 - (void)readerModelDidUpdateState:(XSCReaderModel *)model;
 - (void)readerModel:(XSCReaderModel *)model
@@ -58,6 +61,9 @@ typedef enum XSCPageTurnKey {
 
 - (instancetype)init;
 - (instancetype)initWithImageStore:(XSCImageStore *)imageStore;
+
+/// Cancels pending archive work before the app joins its background workers.
+- (void)cancelBackgroundWork;
 
 - (void)openPath:(const char *)path;
 - (void)openPath:(const char *)path startAtEnd:(bool)startAtEnd;

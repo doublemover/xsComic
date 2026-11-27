@@ -1,6 +1,10 @@
 #pragma once
 
+#if defined(__APPLE__)
+#include <objc3_darwin.h>
+#else
 #include <objc/runtime.h>
+#endif
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -17,13 +21,16 @@
 #if defined(__has_include) && __has_include(<objc3/errors.h>)
 #include <objc3/errors.h>
 #else
+#if defined(__APPLE__)
+__attribute__((objc_non_runtime_protocol))
+#endif
 @protocol Error
 @end
 #endif
 
 /*
  XSCBase provides a tiny, zero-bloat Objective-C 3.0 foundation layer on top of
- libobjc2 (GNUstep 2.2 ABI) + POSIX pthreads. Avoiding GNUstep-Base keeps the
+ the platform's owned Objective-C runtime and POSIX pthreads. Avoiding GNUstep-Base keeps the
  executable small, launch time fast, and memory ownership explicit.
  */
 
@@ -114,6 +121,8 @@ void xsc_dispatch_main(XSCVoidBlock block);
 void xsc_dispatch_main_after_ms(uint64_t delay_ms, XSCVoidBlock block);
 size_t xsc_main_drain(void);
 bool xsc_main_wait_ms(uint64_t timeout_ms);
+/// Monotonic wakeup time for queued main work, or UINT64_MAX when idle.
+uint64_t xsc_main_next_deadline_ms(void);
 
 // Background work dispatch (replaces GCD global concurrent queues)
 void xsc_dispatch_bg(XSCVoidBlock block);

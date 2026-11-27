@@ -3,6 +3,7 @@
 #include "XSCImageStore.h"
 #include "XSCReaderModel.h"
 
+#include <fcntl.h>
 #include <archive.h>
 #include <archive_entry.h>
 #include <errno.h>
@@ -20,6 +21,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <zlib.h>
+
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#endif
 
 static int gPassCount = 0;
 static int gFailCount = 0;
@@ -40,6 +45,13 @@ static double nowMilliseconds(void) {
 }
 
 static uint64_t currentRssBytes(void) {
+#if defined(__APPLE__)
+    mach_task_basic_info_data_t info;
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    kern_return_t result = task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
+                                     (task_info_t)&info, &count);
+    return result == KERN_SUCCESS ? (uint64_t)info.resident_size : 0ULL;
+#else
     FILE *f = fopen("/proc/self/statm", "r");
     if (!f) return 0ULL;
     defer { fclose(f); }
@@ -51,6 +63,7 @@ static uint64_t currentRssBytes(void) {
     long pageSize = sysconf(_SC_PAGESIZE);
     if (pageSize <= 0) pageSize = 4096;
     return (uint64_t)rssPages * (uint64_t)pageSize;
+#endif
 }
 
 #pragma mark - Minimal Byte Buffer & File Helpers
@@ -441,7 +454,7 @@ typedef struct TestZipEntry {
 } TestZipEntry;
 
 static XSCData *rawDeflateData(const uint8_t *src, size_t srcLen) {
-    if (!src || srcLen == 0u) return [XSCData emptyData];
+    if (!src && srcLen != 0u) return nil;
     z_stream zs;
     memset(&zs, 0, sizeof(zs));
     if (deflateInit2(&zs, Z_DEFAULT_COMPRESSION, Z_DEFLATED, -MAX_WBITS, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
@@ -477,7 +490,7 @@ static bool writeTestZIP(const char *path, const TestZipEntry *entries, size_t c
         XSCData *raw = e->payload ? e->payload : [XSCData emptyData];
         XSCData *comp = raw;
         uint16_t method = 0u;
-        if (e->deflate && raw.length > 0u) {
+        if (e->deflate) {
             XSCData *deflated = rawDeflateData(raw.bytes, raw.length);
             if (deflated && deflated.length > 0u) {
                 comp = deflated;
@@ -726,10 +739,14 @@ static void testObjectiveC3Semantics(void) {
     printf("[TEST] Objective-C 3.0 Language & Runtime Semantics\n");
 
     // Compiler feature contract checks
+#if defined(__APPLE__)
+    XSC_ASSERT(__OBJC3__ == 1, "Objective-C 3 compilation is active");
+#else
     XSC_ASSERT(objc3_has_feature(OBJC3_FEATURE_DEFER) != 0, "objc3 defer feature enabled");
     XSC_ASSERT(objc3_has_feature(OBJC3_FEATURE_OPTIONALS) != 0, "objc3 optionals feature enabled");
     XSC_ASSERT(objc3_has_feature(OBJC3_FEATURE_RESULT) != 0, "objc3 result feature enabled");
     XSC_ASSERT(objc3_has_feature(OBJC3_FEATURE_THROWS) != 0, "objc3 throws feature enabled");
+#endif
 
     // 1. defer LIFO ordering + early return execution
     int order[3] = { 0, 0, 0 };
@@ -896,6 +913,43 @@ static void testCBZStoreDeflateZip64Security(XSCString *tmpDir, XSCData *png1, X
         XSC_ASSERT(match0, "STORE payload matches byte-for-byte");
         XSC_ASSERT(match1, "DEFLATE payload matches byte-for-byte");
     }
+
+    XSCString *emptyPath = [tmpDir stringByAppendingPathComponent:"empty-page.cbz"];
+    TestZipEntry emptyEntries[] = {
+        { "01.png", nil, true, false, 0ULL },
+    };
+    XSC_ASSERT(writeTestZIP(emptyPath.utf8, emptyEntries, 1u, false), "write empty DEFLATE page");
+    XSCBook *emptyBook = nil;
+    XSCData *emptyPage = nil;
+    handle {
+        emptyBook = tryValue([XSCBook openPath:emptyPath.utf8 cancelFlag:NULL]);
+        emptyPage = tryValue([emptyBook readPageDataAtIndex:0u]);
+    } catch (XSCError *e) { (void)e; }
+    XSC_ASSERT(emptyPage != nil && emptyPage.length == 0u, "verify a valid empty DEFLATE stream");
+
+    // Simulate a damaged page on disk after a valid index has been opened.
+    XSCString *damagedPath = [tmpDir stringByAppendingPathComponent:"checksum.cbz"];
+    const char *storedName = "01.png";
+    TestZipEntry damagedEntries[] = { { storedName, png1, false, false, 0ULL } };
+    XSC_ASSERT(writeTestZIP(damagedPath.utf8, damagedEntries, 1u, false), "write checksummed STORE page");
+    XSCBook *damagedBook = nil;
+    handle {
+        damagedBook = tryValue([XSCBook openPath:damagedPath.utf8 cancelFlag:NULL]);
+    } catch (XSCError *e) { (void)e; }
+    int damageFd = open(damagedPath.utf8, O_WRONLY | O_CLOEXEC);
+    off_t pageOffset = (off_t)(30u + strlen(storedName));
+    uint8_t changed = png1.bytes[0] ^ 1u;
+    bool damaged = damageFd >= 0 && pwrite(damageFd, &changed, sizeof(changed), pageOffset) == 1;
+    if (damageFd >= 0) close(damageFd);
+    bool rejected = false;
+    if (damagedBook && damaged) {
+        handle {
+            (void)tryValue([damagedBook readPageDataAtIndex:0u]);
+        } catch (XSCError *e) {
+            rejected = e.code == XSCArchiveErrorCorruptArchive;
+        }
+    }
+    XSC_ASSERT(rejected, "revalidate STORE checksum on page read");
 
     // 2. Zip64
     XSCString *z64Path = [tmpDir stringByAppendingPathComponent:"zip64.cbz"];
@@ -1117,6 +1171,19 @@ static void testDirectoryAndAdjacentVolumes(XSCString *tmpDir, XSCData *png1, XS
     XSC_ASSERT(cBook == nil && cancelErrCode == XSCArchiveErrorCancelled,
                "pre-cancelled open aborts with XSCArchiveErrorCancelled (got %d)", cancelErrCode);
 
+    XSCString *moved = [tmpDir stringByAppendingPathComponent:"renamed-dirbook"];
+    XSC_ASSERT(rename(dir.utf8, moved.utf8) == 0, "rename the directory while its book is open");
+    XSCData *rootPage = nil;
+    XSCData *nestedPage = nil;
+    if (book) {
+        handle {
+            rootPage = tryValue([book readPageDataAtIndex:0u]);
+            nestedPage = tryValue([book readPageDataAtIndex:1u]);
+        } catch (XSCError *e) { (void)e; }
+    }
+    XSC_ASSERT(rootPage != nil && [rootPage isEqualToData:png1], "read root page after directory rename");
+    XSC_ASSERT(nestedPage != nil && [nestedPage isEqualToData:png2], "read nested page after directory rename");
+
     // Adjacent volumes
     XSCString *seriesDir = [tmpDir stringByAppendingPathComponent:"series"];
     makeDirs(seriesDir.utf8);
@@ -1247,10 +1314,10 @@ static void testReaderModelAndPredictor(XSCString *tmpDir, XSCData *png1) {
     }
 }
 
-#pragma mark - Test 7: XSCImageStore Cache, MADV_FREE Pin/Volatile, Gray8, RGBA8, EXIF, Coalescing, GIF, Eviction
+#pragma mark - Test 7: XSCImageStore Cache, Gray8, RGBA8, EXIF, Coalescing, GIF, Eviction
 
 static void testImageStoreCachePurgeableGrayGIFExif(XSCString *tmpDir) {
-    printf("[TEST] XSCImageStore Cache, MADV_FREE, Gray8, RGBA8, EXIF, Coalescing, GIF & Eviction\n");
+    printf("[TEST] XSCImageStore Cache, Gray8, RGBA8, EXIF, Coalescing, GIF & Eviction\n");
 
     XSCData *grayRGBPng = makeSyntheticPNG(256u, 256u, true);
     XSCData *colorPng = makeSyntheticPNG(256u, 256u, false);
@@ -1350,6 +1417,10 @@ static void testImageStoreCachePurgeableGrayGIFExif(XSCString *tmpDir) {
         const uint8_t *f1 = [gifPage gifFramePixelsAtIndex:1u outDelayMs:&delay1];
         XSC_ASSERT(f0 != NULL && f1 != NULL && delay0 >= 20u && delay1 >= 20u,
                    "animated GIF frames have valid RGBA buffers & delays (%u ms, %u ms)", delay0, delay1);
+        uint64_t nextChange = 0u;
+        uint64_t elapsed = 1000u * ((uint64_t)delay0 + delay1) + delay0;
+        XSC_ASSERT([gifPage gifFrameAtElapsedMs:elapsed nextChangeMs:&nextChange] == 1u &&
+                   nextChange == elapsed + delay1, "GIF timeline skips missed frames without accumulating drift");
         if (f0 != NULL && f1 != NULL) {
             XSC_ASSERT(f0[0] != f1[0] && f0[1] != f1[1],
                        "animated GIF frame 0 and frame 1 pixels differ as encoded");
@@ -1392,21 +1463,19 @@ static void testImageStoreCachePurgeableGrayGIFExif(XSCString *tmpDir) {
     XSC_ASSERT(store.currentEntryCount <= 3u,
                "cache bounded to maxEntryCount=3 (got %zu)", store.currentEntryCount);
 
-    // 6. Purgeable MADV_FREE Pin/Volatile check
-    if (colorPage != nil) {
-        [colorPage markVolatile];
-        uint64_t rssVol = currentRssBytes();
-        bool pinned = [colorPage pinNonVolatile];
-        XSC_ASSERT(pinned, "pinNonVolatile succeeds after markVolatile (RSS=%.2f MiB)",
-                   (double)rssVol / (1024.0 * 1024.0));
-    }
+    uint32_t pixelBeforeReset = 0u;
+    if (colorPage) memcpy(&pixelBeforeReset, colorPage.pixels, sizeof(pixelBeforeReset));
 
-    // 7. resetKeepingBook:
     [store resetKeepingBook:Some(XSCBook *, book)];
     XSC_ASSERT(store.currentEntryCount > 0u, "resetKeepingBook:Some(book) preserves active book entries");
     [store resetKeepingBook:None(XSCBook *)];
     XSC_ASSERT(store.currentEntryCount == 0u && store.currentByteCount == 0u,
                "resetKeepingBook:None clears cache");
+    if (colorPage) {
+        uint32_t pixelAfterReset = 0u;
+        memcpy(&pixelAfterReset, colorPage.pixels, sizeof(pixelAfterReset));
+        XSC_ASSERT(pixelBeforeReset == pixelAfterReset, "a retained page keeps its pixels after eviction");
+    }
 }
 
 #pragma mark - Adversarial Payload & Archive Builders
@@ -2351,7 +2420,7 @@ static void testConcurrencyAndStress(XSCString *tmpDir, XSCData *png1, XSCData *
                    "tiny budget strictly enforced after rapid turns + oversized page (entries=%zu, bytes=%zu)",
                    tinyStore.currentEntryCount, tinyStore.currentByteCount);
 
-        // Explicit volatility check: mark page 0 volatile via updateRetentionAndPrefetchForBook:, then re-pin
+        // Lower the page's eviction priority and verify the cached pixels remain intact.
         XSCBook *b = match(model.book) { case .Some(let bk) => bk; case .None => (XSCBook *)nil; };
         if (b) {
             __block bool w0 = false;
@@ -2363,12 +2432,12 @@ static void testConcurrencyAndStress(XSCString *tmpDir, XSCData *png1, XSCData *
             [tinyStore updateRetentionAndPrefetchForBook:b
                                           visibleIndices:[XSCIndexList listWithValues:visOther count:1u]
                                           orderedIndices:[XSCIndexList emptyList]];
-            XSCOptDecodedPage repinned = [tinyStore cachedPageForBook:b index:0u];
-            bool repinOk = match(repinned) {
+            XSCOptDecodedPage retainedPage = [tinyStore cachedPageForBook:b index:0u];
+            bool retainedPixelsOK = match(retainedPage) {
                 case .Some(let p) => (p != nil && p.pixels != NULL && p.pixelWidth == 128u && p.pixels[3] == 255u);
                 case .None => false;
             };
-            XSC_ASSERT(repinOk, "volatile cached page re-pins cleanly with intact pixels");
+            XSC_ASSERT(retainedPixelsOK, "cached page retains intact pixels after its eviction priority changes");
         }
     }
 
@@ -2543,9 +2612,9 @@ static void runBenchmarks(XSCString *tmpDir) {
     }
 
     uint64_t rss = currentRssBytes();
-    printf("  Process RSS (/proc/self/statm): %.2f MiB (%llu bytes)\n",
+    printf("  Process resident memory     : %.2f MiB (%llu bytes)\n",
            (double)rss / (1024.0 * 1024.0), (unsigned long long)rss);
-    XSC_ASSERT(rss > 0ULL, "Linux /proc/self/statm RSS readable");
+    XSC_ASSERT(rss > 0ULL, "process resident memory readable");
 }
 
 int main(void) {

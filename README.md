@@ -29,7 +29,7 @@ and even educational. (The RAM footprint could still use some work.)
 - Single-page and two-page spreads, left-to-right or right-to-left.
 - Keyboard navigation, focal-point zoom, drag panning, fit, and actual size.
 - Collapsible page sidebar, direct page jump (`Cmd+Shift+G` on macOS, `Ctrl+Shift+G` / `G` on Linux), and adjacent-volume continuation.
-- Zero-extraction `pread` archive reading, GPU Lanczos-3 downscaling with EXIF 1–8 orientation, 8-bit grayscale repacking, and purgeable page caching.
+- Zero-extraction `pread` archive reading, GPU downscaling with EXIF 1–8 orientation, 8-bit grayscale repacking, and bounded page caching.
 
 ## macOS
 
@@ -45,13 +45,13 @@ Compiles directly with `clang` against macOS system frameworks and libraries (`A
 
 ## Linux (Slopjective-C / Objective-C 3.0)
 
-Native **Objective-C 3.0, SDL2, and OpenGL 3.3 Core** port (`Sources/xsComicLinux/`, `Tests/xsComicLinuxTests/`) targeting Linux (`aarch64` / `x86_64`, verified on Debian 13), compiled with [**Slopjective-C**](https://github.com/doublemover/Slopjective-C) (`objc3c` `v0.1.0-preview.1`, patched Clang 23.1.5, GNUstep 2.2 ABI + `libobjc2`, zero GNUstep-Base).
+Native **Objective-C 3.0, SDL2, and OpenGL 3.3 Core** port (`Sources/xsComicLinux/`, `Tests/xsComicLinuxTests/`) targeting Linux (`aarch64` / `x86_64`, verified on Debian 13), compiled with [**Slopjective-C**](https://github.com/doublemover/Slopjective-C) (`objc3c` `v0.1.0-preview.2`, patched Clang 23.1.5, GNUstep 2.2 ABI + `libobjc2`, zero GNUstep-Base).
 
 ```sh
 # Build the stripped release binary (build/linux/xscomic)
 ./scripts/build-linux.sh --release
 
-# Run the 183-assertion Linux test and benchmark suite
+# Run the Linux core test and benchmark suite
 ./scripts/run-linux-tests.sh
 
 # Build and launch (interactive X11/Wayland or headless --screenshot)
@@ -60,7 +60,29 @@ Native **Objective-C 3.0, SDL2, and OpenGL 3.3 Core** port (`Sources/xsComicLinu
 
 Compiles `.objc3` sources directly with `objc3c` (`-Oz -flto=thin -Wl,--gc-sections -Wl,--as-needed` + `strip`) against system Linux libraries (`zlib`, `libarchive`, `libjpeg-turbo`, `libpng`, `libwebp`, `giflib`, `libtiff`, `libavif`, `libheif`, `SDL2`, `SDL2_ttf`, OpenGL, `pthreads`). On Linux with `objc3c` (or `/opt/objc3c/activate.sh`) installed, all scripts run natively; on macOS or hosts without the SDK, they automatically build and delegate through [`scripts/docker-env.sh`](scripts/docker-env.sh) and [`docker/Dockerfile`](docker/Dockerfile).
 
-Measured on Debian 13 (`aarch64`, full record in [`Metrics/linux-objc3.json`](Metrics/linux-objc3.json)):
+[Linux CI](.github/workflows/linux.yml) builds the pinned SDK image on x86-64
+and AArch64. Each runner runs the core suite and a release smoke test covering
+rendered images and X11 interaction.
+
+[macOS CI](.github/workflows/macos.yml) builds and verifies the AppKit app on
+Apple Silicon and runs its reader tests in parallel. It uses the `macos-26`
+runner by default. A manual run can select `macos-15` if runner allocation
+fails. The Objective-C 3 core also has a native qualification entry point
+for the experimental Darwin SDK. Use the Xcode
+version required by the installed SDK and install the codec dependencies.
+[Slopjective-C #8340](https://github.com/doublemover/Slopjective-C/issues/8340)
+
+```sh
+brew install pkg-config libarchive jpeg-turbo libpng webp libtiff libavif libheif giflib
+XSCOMIC_OBJC3_SDK="/path/to/installed/Darwin SDK" ./scripts/run-objc3-macos-tests.sh
+```
+
+The script builds the same core sources and test suite on Apple Silicon.
+Build logs, SDK identity, library paths, and results are saved under
+`build/objc3-macos-tests/`.
+
+The original port's benchmark snapshot was recorded on Debian 13
+(`aarch64`). The [measurement record](Metrics/linux-objc3.json) includes the source digest.
 
 | Metric | Measured |
 | --- | --- |

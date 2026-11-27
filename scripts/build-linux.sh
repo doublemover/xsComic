@@ -61,20 +61,17 @@ if ! is_native_objc3_linux; then
     if [[ -n "${XSCOMIC_NO_LTO:-}" ]]; then
         DOCKER_ENV_ARGS+=("XSCOMIC_NO_LTO=$XSCOMIC_NO_LTO")
     fi
-    if [[ -n "${CBR_SCRATCH_PATH:-}" ]]; then
-        if [[ "$CBR_SCRATCH_PATH" != /* ]]; then
-            DOCKER_ENV_ARGS+=("CBR_SCRATCH_PATH=$CBR_SCRATCH_PATH")
-        elif [[ "$CBR_SCRATCH_PATH" == "$ROOT/"* ]]; then
-            DOCKER_ENV_ARGS+=("CBR_SCRATCH_PATH=${CBR_SCRATCH_PATH#"$ROOT/"}")
+    for name in CBR_SCRATCH_PATH CBR_OUTPUT_DIR; do
+        value="${!name:-}"
+        if [[ -z "$value" ]]; then continue; fi
+        if [[ "$value" == "$ROOT/"* ]]; then
+            value="${value#"$ROOT/"}"
+        elif [[ "$value" == /* ]]; then
+            echo "Error: $name must be inside the checkout for Docker builds." >&2
+            exit 2
         fi
-    fi
-    if [[ -n "${CBR_OUTPUT_DIR:-}" ]]; then
-        if [[ "$CBR_OUTPUT_DIR" != /* ]]; then
-            DOCKER_ENV_ARGS+=("CBR_OUTPUT_DIR=$CBR_OUTPUT_DIR")
-        elif [[ "$CBR_OUTPUT_DIR" == "$ROOT/"* ]]; then
-            DOCKER_ENV_ARGS+=("CBR_OUTPUT_DIR=${CBR_OUTPUT_DIR#"$ROOT/"}")
-        fi
-    fi
+        DOCKER_ENV_ARGS+=("$name=$value")
+    done
     exec "$ROOT/scripts/docker-env.sh" \
         env "${DOCKER_ENV_ARGS[@]}" \
         bash /work/scripts/build-linux.sh "--$CONFIGURATION"
@@ -160,7 +157,7 @@ lock_path_for() {
     else
         key=$(printf '%s' "$resource" | cksum | awk '{print $1}')
     fi
-    printf '/tmp/xscomic-build-lock.%s\n' "$key"
+    printf '%s/xscomic-build-lock.%s\n' "$BUILD_LOCK_DIR" "$key"
 }
 
 SCRATCH_PATH=$(canonicalize_path "${CBR_SCRATCH_PATH:-$ROOT/build/objc3}")
@@ -170,6 +167,8 @@ validate_mutable_path "$SCRATCH_PATH" "Build scratch path"
 validate_mutable_path "$OUTPUT_DIR" "Output directory"
 require_disjoint_paths "$OUTPUT_DIR" "$SCRATCH_PATH" "Output directory" "Build scratch path"
 
+BUILD_LOCK_DIR="${XSCOMIC_BUILD_LOCK_DIR:-/tmp}"
+mkdir -p "$BUILD_LOCK_DIR"
 OUTPUT_LOCK_DIR=$(lock_path_for "$OUTPUT_DIR")
 SCRATCH_LOCK_DIR=$(lock_path_for "$SCRATCH_PATH")
 OWNS_OUTPUT_LOCK=false

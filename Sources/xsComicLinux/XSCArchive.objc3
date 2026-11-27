@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
 #include <zlib.h>
 
@@ -27,6 +28,8 @@ static const uint64_t kXSCMaxEntryCount = 100000ULL;
 static const uint64_t kXSCMaxPageBytes = 256ULL * 1024ULL * 1024ULL;
 static const uint64_t kXSCMaxCentralDirBytes = 64ULL * 1024ULL * 1024ULL;
 static const uint64_t kXSCMaxInMemoryArchiveBytes = 256ULL * 1024ULL * 1024ULL;
+static const uint64_t kXSCMaxSpillBookBytes = 2ULL * 1024ULL * 1024ULL * 1024ULL;
+static const uint64_t kXSCMaxSpillProcessBytes = 4ULL * 1024ULL * 1024ULL * 1024ULL;
 static const size_t kXSCMaxMetaHeaderBytes = 64u * 1024u;
 static const size_t kXSCMaxInitialDataCap = 4u * 1024u * 1024u;
 static const int kXSCMaxDirectoryDepth = 64;
@@ -38,9 +41,9 @@ typedef Result(XSCData *, XSCError *) XSCDataResult;
 #pragma mark - Process-Scoped Spill Workspace (pthread_once + atexit)
 
 /*
- CBZ/ZIP and CBT/TAR never write to disk. CBR/CB7 archives <= 256 MiB stay in
- memory. Only libarchive volumes whose decoded image bytes exceed 256 MiB spill
- overflow pages into a private per-process root under /tmp/xsComic-XXXXXX.
+ Native ZIP and tar reads use file offsets. The libarchive reader spills
+ oversized or unknown-length pages into a private process directory and
+ shares a disk budget across all open books.
 
  Ownership contract:
    - Each spilled XSCBook owns one unique subdirectory below gSpillRoot and
@@ -50,6 +53,21 @@ typedef Result(XSCData *, XSCError *) XSCDataResult;
 static char gSpillRoot[PATH_MAX];
 static pthread_once_t gSpillRootOnce = PTHREAD_ONCE_INIT;
 static _Atomic(uint64_t) gNextSpillDirID = 1u;
+static _Atomic(uint64_t) gSpillBytes;
+static uint64_t gSpillLimitBytes;
+
+static bool xscReserveSpillBytes(uint64_t bookSpillBytes, size_t additional) {
+    if (additional > kXSCMaxSpillBookBytes - bookSpillBytes) return false;
+
+    uint64_t used = atomic_load_explicit(&gSpillBytes, memory_order_relaxed);
+    while (additional <= gSpillLimitBytes - used) {
+        if (atomic_compare_exchange_weak_explicit(&gSpillBytes, &used, used + additional,
+                                                  memory_order_relaxed, memory_order_relaxed)) {
+            return true;
+        }
+    }
+    return false;
+}
 
 static void xscCleanupSpillRoot(void) {
     if (gSpillRoot[0] != '\0') {
@@ -58,12 +76,22 @@ static void xscCleanupSpillRoot(void) {
 }
 
 static void xscInitSpillRoot(void) {
-    char tmpl[] = "/tmp/xsComic-XXXXXX";
-    char *created = mkdtemp(tmpl);
-    if (created && created[0] != '\0' && strlen(created) < sizeof(gSpillRoot)) {
-        snprintf(gSpillRoot, sizeof(gSpillRoot), "%s", created);
-        atexit(xscCleanupSpillRoot);
+    const char *temporaryDir = getenv("TMPDIR");
+    if (!temporaryDir || temporaryDir[0] != '/') temporaryDir = "/tmp";
+    char path[PATH_MAX];
+    int n = snprintf(path, sizeof(path), "%s/xsComic-XXXXXX", temporaryDir);
+    if (n <= 0 || (size_t)n >= sizeof(path) || !mkdtemp(path)) return;
+
+    struct statvfs fs;
+    if (statvfs(path, &fs) != 0 || fs.f_frsize == 0u) {
+        rmdir(path);
+        return;
     }
+    uint64_t blocks = fs.f_bavail / 2u;
+    gSpillLimitBytes = blocks > kXSCMaxSpillProcessBytes / fs.f_frsize
+        ? kXSCMaxSpillProcessBytes : blocks * fs.f_frsize;
+    memcpy(gSpillRoot, path, (size_t)n + 1u);
+    atexit(xscCleanupSpillRoot);
 }
 
 static const char *xscSpillWorkspaceRoot(void) {
@@ -584,6 +612,7 @@ typedef struct {
     uint16_t compressionMethod; // ZIP method (0=STORE, 8=DEFLATE)
     uint16_t flags;             // bit 0: spilled-to-disk for libarchive
     uint32_t payloadIndex;      // index into _payloads or spill file ID
+    uint32_t zipCRC32;
     uint64_t dataOffset;        // ZIP localHeaderOffset or TAR dataOffset
     uint64_t compressedSize;
     uint64_t uncompressedSize;
@@ -647,7 +676,30 @@ static bool xscPayloadListAppend(XSCPayloadList *list, uint8_t *bytes, size_t le
     return true;
 }
 
-// glibc qsort_r comparator: thunk is the THIRD argument.
+typedef int (*XSCCompareWithContext)(const void *, const void *, void *);
+
+#if defined(__APPLE__)
+typedef struct {
+    XSCCompareWithContext compare;
+    void *context;
+} XSCSortContext;
+
+static int xscCompareDarwin(void *context, const void *lhs, const void *rhs) {
+    const XSCSortContext *sort = context;
+    return sort->compare(lhs, rhs, sort->context);
+}
+#endif
+
+static void xscSortWithContext(void *items, size_t count, size_t size,
+                               XSCCompareWithContext compare, void *context) {
+#if defined(__APPLE__)
+    XSCSortContext sort = { compare, context };
+    qsort_r(items, count, size, &sort, xscCompareDarwin);
+#else
+    qsort_r(items, count, size, compare, context);
+#endif
+}
+
 static int xscCompareEntries(const void *lhsPtr, const void *rhsPtr, void *thunk) {
     const XSCByteArena *arena = (const XSCByteArena *)thunk;
     const XSCEntry *a = (const XSCEntry *)lhsPtr;
@@ -690,21 +742,17 @@ static XSCDataResult xscReadRangeFromFD(int fd, uint64_t offset, uint64_t size, 
 
 /*
  Raw RFC 1951 DEFLATE decompression via zlib inflateInit2(&zs, -MAX_WBITS).
- Bounds output to `uncompressedSize` and probes with a 1-byte sentinel whenever
- avail_out reaches 0 without Z_STREAM_END, catching both exact-fit EOB boundaries
- and lying-header zip bombs.
+ Provides one extra byte so a stream that exactly fills the declared size can
+ reach its end marker. Any use of the extra byte invalidates the entry.
  */
 static XSCDataResult xscInflateRawDeflate(const uint8_t *compBuf,
                                           size_t compressedSize,
                                           size_t uncompressedSize) {
-    if (uncompressedSize == 0u) {
-        return Ok(XSCData *, XSCError *, [XSCData emptyData]);
-    }
     if (compressedSize == 0u || compressedSize > kXSCMaxPageBytes || uncompressedSize > kXSCMaxPageBytes) {
         return Err(XSCData *, XSCError *, xscMakeError(XSCArchiveErrorCorruptArchive, "Invalid compressed ZIP entry size."));
     }
 
-    uint8_t *outBuf = (uint8_t *)malloc(uncompressedSize);
+    uint8_t *outBuf = (uint8_t *)malloc(uncompressedSize + 1u);
     if (!outBuf) {
         return Err(XSCData *, XSCError *, xscMakeError(XSCArchiveErrorIOFailure, "Out of memory."));
     }
@@ -720,26 +768,16 @@ static XSCDataResult xscInflateRawDeflate(const uint8_t *compBuf,
     zs.next_in = (Bytef *)compBuf;
     zs.avail_in = (uInt)compressedSize;
     zs.next_out = outBuf;
-    zs.avail_out = (uInt)uncompressedSize;
+    zs.avail_out = (uInt)(uncompressedSize + 1u);
 
     int zrc = inflate(&zs, Z_FINISH);
-    size_t produced = uncompressedSize - (size_t)zs.avail_out;
-
-    bool overflowed = false;
-    if ((zrc == Z_OK || zrc == Z_BUF_ERROR) && zs.avail_out == 0u) {
-        uint8_t sentinel = 0u;
-        zs.next_out = &sentinel;
-        zs.avail_out = 1u;
-        zrc = inflate(&zs, Z_FINISH);
-        if (zs.avail_out != 1u) {
-            overflowed = true;
-        }
-    }
-
-    if (overflowed || zrc != Z_STREAM_END || produced != uncompressedSize) {
+    if (zrc != Z_STREAM_END || zs.total_out != uncompressedSize || zs.avail_in != 0u) {
         return Err(XSCData *, XSCError *, xscMakeError(XSCArchiveErrorCorruptArchive, "Failed decompressing ZIP page."));
     }
 
+    if (uncompressedSize == 0u) {
+        return Ok(XSCData *, XSCError *, [XSCData emptyData]);
+    }
     uint8_t *owned = outBuf;
     outBuf = NULL;
     XSCData *data = [XSCData dataTakingBytesNoCopy:owned length:uncompressedSize];
@@ -749,28 +787,35 @@ static XSCDataResult xscInflateRawDeflate(const uint8_t *compBuf,
     return Ok(XSCData *, XSCError *, data);
 }
 
+static XSCDataResult xscReadZipPage(int fd, uint64_t offset, XSCEntry entry) {
+    if (entry.compressionMethod == 0u) {
+        return xscReadRangeFromFD(fd, offset, entry.uncompressedSize, "Failed reading ZIP page.");
+    }
+    if (entry.compressionMethod != 8u) {
+        return Err(XSCData *, XSCError *, xscMakeError(XSCArchiveErrorUnsupportedFormat, "Unsupported ZIP compression method."));
+    }
+    if (entry.compressedSize == 0u || entry.compressedSize > kXSCMaxPageBytes) {
+        return Err(XSCData *, XSCError *, xscMakeError(XSCArchiveErrorCorruptArchive, "Invalid compressed ZIP entry size."));
+    }
+    uint8_t *compressed = (uint8_t *)malloc((size_t)entry.compressedSize);
+    if (!compressed) {
+        return Err(XSCData *, XSCError *, xscMakeError(XSCArchiveErrorIOFailure, "Out of memory."));
+    }
+    defer { free(compressed); }
+
+    if (!xscPreadAll(fd, compressed, (size_t)entry.compressedSize, (off_t)offset)) {
+        return Err(XSCData *, XSCError *, xscMakeError(XSCArchiveErrorIOFailure, "Failed reading compressed ZIP page."));
+    }
+    return xscInflateRawDeflate(compressed, (size_t)entry.compressedSize, (size_t)entry.uncompressedSize);
+}
+
 /*
  Opens a page inside a directory book while blocking symlink escape on both
  leaf files and any intermediate subdirectory components.
  */
-static int xscOpenBookRelativeNoFollow(const char *rootDir,
-                                       size_t rootDirLen,
-                                       const char *relName,
-                                       size_t relLen) {
-    if (memchr(relName, '/', relLen) == NULL) {
-        bool needsSlash = (rootDirLen == 0u || rootDir[rootDirLen - 1u] != '/');
-        size_t fullLen = rootDirLen + (needsSlash ? 1u : 0u) + relLen;
-        char stackBuf[PATH_MAX];
-        char *pathBuf = (fullLen + 1u <= sizeof(stackBuf)) ? stackBuf : (char *)malloc(fullLen + 1u);
-        if (!pathBuf) return -1;
-        defer { if (pathBuf != stackBuf) free(pathBuf); }
-        xscJoinPath(pathBuf, fullLen + 1u, rootDir, rootDirLen, relName, relLen);
-        return open(pathBuf, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
-    }
-
-    int curFd = open(rootDir, O_RDONLY | O_DIRECTORY | O_NONBLOCK);
-    if (curFd < 0) return -1;
-    defer { if (curFd >= 0) close(curFd); }
+static int xscOpenBookRelativeNoFollow(int rootFd, const char *relName, size_t relLen) {
+    int curFd = rootFd;
+    defer { if (curFd != rootFd) close(curFd); }
 
     size_t start = 0u;
     while (start < relLen) {
@@ -783,21 +828,22 @@ static int xscOpenBookRelativeNoFollow(const char *rootDir,
         comp[compLen] = '\0';
 
         if (slash) {
-            int nextFd = openat(curFd, comp, O_RDONLY | O_NOFOLLOW | O_DIRECTORY | O_NONBLOCK);
+            int nextFd = openat(curFd, comp, O_RDONLY | O_NOFOLLOW | O_DIRECTORY | O_NONBLOCK | O_CLOEXEC);
             if (nextFd < 0) return -1;
-            close(curFd);
+            if (curFd != rootFd) close(curFd);
             curFd = nextFd;
             start = (size_t)(slash - relName) + 1u;
         } else {
-            return openat(curFd, comp, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+            return openat(curFd, comp, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
         }
     }
     return -1;
 }
 
-#pragma mark - Directory Walker (POSIX opendir/readdir + d_type + lstat)
+#pragma mark - Directory Walker
 
-static void xscWalkDirectory(const char *dirPath,
+// Takes ownership of dirFd on all paths.
+static void xscWalkDirectory(int dirFd,
                              const char *relPrefix,
                              size_t relPrefixLen,
                              int depth,
@@ -805,16 +851,14 @@ static void xscWalkDirectory(const char *dirPath,
                              XSCEntryList *entries,
                              size_t *visitedCount,
                              const _Atomic(bool) *cancelFlag) throws(XSCError *) {
-    if (depth > kXSCMaxDirectoryDepth) return;
-
-    DIR *dir = opendir(dirPath);
+    DIR *dir = fdopendir(dirFd);
     if (!dir) {
+        close(dirFd);
         XSCError *err = xscMakeError(XSCArchiveErrorIOFailure, "The selected directory could not be read.");
         throwError(err);
     }
     defer { closedir(dir); }
 
-    size_t dirPathLen = strlen(dirPath);
     struct dirent *ent = NULL;
     while ((ent = readdir(dir)) != NULL) {
         if ((++(*visitedCount) & 255u) == 0u && xscIsCancelled(cancelFlag)) {
@@ -830,12 +874,8 @@ static void xscWalkDirectory(const char *dirPath,
         if (dType == DT_LNK) continue; // never follow symlinks
 
         if (dType == DT_UNKNOWN) {
-            char fullBuf[PATH_MAX];
-            if (xscJoinPath(fullBuf, sizeof(fullBuf), dirPath, dirPathLen, name, nameLen) == 0u) {
-                continue;
-            }
             struct stat st;
-            if (lstat(fullBuf, &st) != 0) continue;
+            if (fstatat(dirFd, name, &st, AT_SYMLINK_NOFOLLOW) != 0) continue;
             if (S_ISREG(st.st_mode)) {
                 dType = DT_REG;
             } else if (S_ISDIR(st.st_mode)) {
@@ -857,27 +897,26 @@ static void xscWalkDirectory(const char *dirPath,
                 XSCError *err = xscMakeError(XSCArchiveErrorIOFailure, "Directory exceeds maximum page limit.");
                 throwError(err);
             }
-        } else if (dType == DT_DIR) {
-            bool needsSlash = (dirPathLen == 0u || dirPath[dirPathLen - 1u] != '/');
-            size_t subFullLen = dirPathLen + (needsSlash ? 1u : 0u) + nameLen;
+        } else if (dType == DT_DIR && depth < kXSCMaxDirectoryDepth) {
             size_t nextPrefLen = relPrefixLen + nameLen + 1u;
-            char *subFull = (char *)malloc(subFullLen + 1u);
             char *nextPref = (char *)malloc(nextPrefLen + 1u);
-            defer {
-                free(subFull);
-                free(nextPref);
-            }
-            if (!subFull || !nextPref) {
+            defer { free(nextPref); }
+            if (!nextPref) {
                 XSCError *err = xscMakeError(XSCArchiveErrorIOFailure, "Out of memory.");
                 throwError(err);
             }
-            xscJoinPath(subFull, subFullLen + 1u, dirPath, dirPathLen, name, nameLen);
             if (relPrefixLen > 0u) memcpy(nextPref, relPrefix, relPrefixLen);
             memcpy(nextPref + relPrefixLen, name, nameLen);
             nextPref[relPrefixLen + nameLen] = '/';
             nextPref[nextPrefLen] = '\0';
 
-            tryValue(xscWalkDirectory(subFull,
+            int childFd = openat(dirFd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+            if (childFd < 0) {
+                if (errno == ENOTDIR || errno == ELOOP || errno == ENOENT) continue;
+                XSCError *err = xscMakeError(XSCArchiveErrorIOFailure, "A subdirectory could not be read.");
+                throwError(err);
+            }
+            tryValue(xscWalkDirectory(childFd,
                                       nextPref,
                                       nextPrefLen,
                                       depth + 1,
@@ -1097,17 +1136,14 @@ static int xscCompareSiblings(const void *lhsPtr, const void *rhsPtr, void *thun
     XSCByteArena _arena;
     XSCEntry *_entries;
 
-    // Directory backend (immutable root path; reads open with O_NOFOLLOW + fstat)
-    char *_rootDir;
-    size_t _rootDirLen;
-
-    // ZIP & TAR backend (single read-only fd accessed via stateless pread(2))
+    // Anchors directory books to the open root and ZIP/TAR books to the open archive.
     int _fd;
     uint64_t _fileSize;
 
     // libarchive backend (owned immutable byte buffers + optional per-book spill dir)
     XSCPayloadList _payloads;
     char *_spillDir;
+    uint64_t _spillBytes;
 }
 
 - (XSCString *)sourcePath { return _sourcePath ? _sourcePath : [XSCString emptyString]; }
@@ -1315,14 +1351,12 @@ static int xscCompareSiblings(const void *lhsPtr, const void *rhsPtr, void *thun
     free(_entries);
     _entries = NULL;
     xscArenaFree(&_arena);
-    free(_rootDir);
-    _rootDir = NULL;
-    _rootDirLen = 0u;
     xscPayloadListFree(&_payloads);
     if (_spillDir) {
         xsc_remove_tree(_spillDir);
         free(_spillDir);
         _spillDir = NULL;
+        atomic_fetch_sub_explicit(&gSpillBytes, _spillBytes, memory_order_relaxed);
     }
 }
 
@@ -1399,16 +1433,12 @@ static int xscCompareSiblings(const void *lhsPtr, const void *rhsPtr, void *thun
 + (XSCBook *)openDirectoryAtPath:(const char *)path
                       sourcePath:(XSCString *)sourcePath
                       cancelFlag:(const _Atomic(bool) *)cancelFlag throws(XSCError *) {
-    size_t rootLen = strlen(path);
-    while (rootLen > 1u && path[rootLen - 1u] == '/') rootLen--;
-    char *rootDir = (char *)malloc(rootLen + 1u);
-    if (!rootDir) {
-        XSCError *err = xscMakeError(XSCArchiveErrorIOFailure, "Out of memory.");
+    int rootFd = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (rootFd < 0) {
+        XSCError *err = xscMakeError(XSCArchiveErrorIOFailure, "The selected directory could not be read.");
         throwError(err);
     }
-    defer { free(rootDir); }
-    memcpy(rootDir, path, rootLen);
-    rootDir[rootLen] = '\0';
+    defer { if (rootFd >= 0) close(rootFd); }
 
     XSCByteArena arena = { NULL, 0u, 0u };
     if (!xscArenaInit(&arena, 16384u)) {
@@ -1421,7 +1451,12 @@ static int xscCompareSiblings(const void *lhsPtr, const void *rhsPtr, void *thun
     defer { free(list.items); }
 
     size_t visited = 0u;
-    tryValue(xscWalkDirectory(rootDir, "", 0u, 0, &arena, &list, &visited, cancelFlag));
+    int scanFd = fcntl(rootFd, F_DUPFD_CLOEXEC, 0);
+    if (scanFd < 0) {
+        XSCError *err = xscMakeError(XSCArchiveErrorIOFailure, "Could not open directory for scanning.");
+        throwError(err);
+    }
+    tryValue(xscWalkDirectory(scanFd, "", 0u, 0, &arena, &list, &visited, cancelFlag));
 
     if (xscIsCancelled(cancelFlag)) {
         XSCError *err = xscMakeError(XSCArchiveErrorCancelled, "Cancelled.");
@@ -1432,7 +1467,7 @@ static int xscCompareSiblings(const void *lhsPtr, const void *rhsPtr, void *thun
         throwError(err);
     }
 
-    qsort_r(list.items, list.count, sizeof(XSCEntry), xscCompareEntries, &arena);
+    xscSortWithContext(list.items, list.count, sizeof(XSCEntry), xscCompareEntries, &arena);
 
     if (xscIsCancelled(cancelFlag)) {
         XSCError *err = xscMakeError(XSCArchiveErrorCancelled, "Cancelled.");
@@ -1453,9 +1488,8 @@ static int xscCompareSiblings(const void *lhsPtr, const void *rhsPtr, void *thun
     arena.len = 0u;
     arena.cap = 0u;
     list.items = NULL;
-    book->_rootDir = rootDir;
-    book->_rootDirLen = rootLen;
-    rootDir = NULL;
+    book->_fd = rootFd;
+    rootFd = -1;
     return book;
 }
 
@@ -1464,7 +1498,7 @@ static int xscCompareSiblings(const void *lhsPtr, const void *rhsPtr, void *thun
 + (XSCBook *)openZipAtPath:(const char *)path
                 sourcePath:(XSCString *)sourcePath
                 cancelFlag:(const _Atomic(bool) *)cancelFlag throws(XSCError *) {
-    int fd = open(path, O_RDONLY | O_NONBLOCK);
+    int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
     if (fd < 0) {
         XSCError *err = xscMakeError(XSCArchiveErrorIOFailure, "Could not open archive file.");
         throwError(err);
@@ -1604,6 +1638,7 @@ static int xscCompareSiblings(const void *lhsPtr, const void *rhsPtr, void *thun
         uint16_t versionMadeBy = xscReadU16LE(cdBuf + cur + 4u);
         uint16_t gpFlags = xscReadU16LE(cdBuf + cur + 8u);
         uint16_t method = xscReadU16LE(cdBuf + cur + 10u);
+        uint32_t checksum = xscReadU32LE(cdBuf + cur + 16u);
         uint64_t compSize = xscReadU32LE(cdBuf + cur + 20u);
         uint64_t uncompSize = xscReadU32LE(cdBuf + cur + 24u);
         uint16_t nameLen = xscReadU16LE(cdBuf + cur + 28u);
@@ -1704,6 +1739,7 @@ static int xscCompareSiblings(const void *lhsPtr, const void *rhsPtr, void *thun
             XSCEntry e;
             memset(&e, 0, sizeof(e));
             e.compressionMethod = method;
+            e.zipCRC32 = checksum;
             e.dataOffset = localOff;
             e.compressedSize = compSize;
             e.uncompressedSize = uncompSize;
@@ -1726,7 +1762,7 @@ static int xscCompareSiblings(const void *lhsPtr, const void *rhsPtr, void *thun
         throwError(err);
     }
 
-    qsort_r(list.items, list.count, sizeof(XSCEntry), xscCompareEntries, &arena);
+    xscSortWithContext(list.items, list.count, sizeof(XSCEntry), xscCompareEntries, &arena);
 
     XSCBook *book = [[XSCBook alloc] initWithSourcePath:sourcePath
                                                    kind:XSCBookKindZip
@@ -1752,7 +1788,7 @@ static int xscCompareSiblings(const void *lhsPtr, const void *rhsPtr, void *thun
 + (XSCBook *)openTarAtPath:(const char *)path
                 sourcePath:(XSCString *)sourcePath
                 cancelFlag:(const _Atomic(bool) *)cancelFlag throws(XSCError *) {
-    int fd = open(path, O_RDONLY | O_NONBLOCK);
+    int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
     if (fd < 0) {
         XSCError *err = xscMakeError(XSCArchiveErrorIOFailure, "Could not open archive file.");
         throwError(err);
@@ -1951,7 +1987,7 @@ static int xscCompareSiblings(const void *lhsPtr, const void *rhsPtr, void *thun
         throwError(err);
     }
 
-    qsort_r(list.items, list.count, sizeof(XSCEntry), xscCompareEntries, &arena);
+    xscSortWithContext(list.items, list.count, sizeof(XSCEntry), xscCompareEntries, &arena);
 
     XSCBook *book = [[XSCBook alloc] initWithSourcePath:sourcePath
                                                    kind:XSCBookKindTar
@@ -1985,6 +2021,18 @@ static int xscCompareSiblings(const void *lhsPtr, const void *rhsPtr, void *thun
         }
     }
 
+    int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) {
+        XSCError *err = xscMakeError(XSCArchiveErrorIOFailure, "The selected archive could not be read.");
+        throwError(err);
+    }
+    defer { close(fd); }
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+        XSCError *err = xscMakeError(XSCArchiveErrorCorruptArchive, "The archive is not a regular file.");
+        throwError(err);
+    }
+
     struct archive *a = archive_read_new();
     if (!a) {
         XSCError *err = xscMakeError(XSCArchiveErrorIOFailure, "Could not initialize archive reader.");
@@ -1995,7 +2043,7 @@ static int xscCompareSiblings(const void *lhsPtr, const void *rhsPtr, void *thun
     archive_read_support_format_all(a);
     archive_read_support_filter_all(a);
 
-    if (archive_read_open_filename(a, path, 65536u) != ARCHIVE_OK) {
+    if (archive_read_open_fd(a, fd, 65536u) != ARCHIVE_OK) {
         const char *msg = archive_error_string(a);
         XSCError *err = xscMakeError(XSCArchiveErrorCorruptArchive,
                                      (msg && msg[0] != '\0') ? msg : "The archive could not be opened.");
@@ -2016,10 +2064,12 @@ static int xscCompareSiblings(const void *lhsPtr, const void *rhsPtr, void *thun
     defer { xscPayloadListFree(&payloads); }
 
     char *spillDir = NULL;
+    uint64_t spillBytes = 0u;
     defer {
         if (spillDir) {
             xsc_remove_tree(spillDir);
             free(spillDir);
+            atomic_fetch_sub_explicit(&gSpillBytes, spillBytes, memory_order_relaxed);
         }
     }
 
@@ -2079,7 +2129,9 @@ static int xscCompareSiblings(const void *lhsPtr, const void *rhsPtr, void *thun
             throwError(err);
         }
 
-        bool spillThis = (totalMemoryBytes >= kXSCMaxInMemoryArchiveBytes);
+        uint64_t remainingMemoryBytes = kXSCMaxInMemoryArchiveBytes - totalMemoryBytes;
+        bool sizeKnown = archive_entry_size_is_set(entry) != 0 && declaredSize >= 0;
+        bool spillThis = !sizeKnown || (uint64_t)declaredSize > remainingMemoryBytes;
         int spillFd = -1;
         defer { if (spillFd >= 0) close(spillFd); }
 
@@ -2123,19 +2175,15 @@ static int xscCompareSiblings(const void *lhsPtr, const void *rhsPtr, void *thun
                 XSCError *err = xscMakeError(XSCArchiveErrorIOFailure, "Temporary spill path too long.");
                 throwError(err);
             }
-            spillFd = open(spillPath, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
+            spillFd = open(spillPath, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
             if (spillFd < 0) {
                 XSCError *err = xscMakeError(XSCArchiveErrorIOFailure, "Could not create temporary spill file.");
                 throwError(err);
             }
         } else {
-            // Cap initial preallocation so a corrupt header claiming 250 MiB cannot force
-            // a massive upfront allocation before any bytes are actually decompressed.
-            memCap = (declaredSize > 0)
-                ? (size_t)((uint64_t)declaredSize < kXSCMaxInitialDataCap
-                           ? (uint64_t)declaredSize
-                           : kXSCMaxInitialDataCap)
-                : 65536u;
+            // Grow as data arrives without exceeding the declared or in-memory size.
+            memCap = (uint64_t)declaredSize < kXSCMaxInitialDataCap
+                ? (size_t)declaredSize : kXSCMaxInitialDataCap;
             if (memCap > 0u) {
                 memBuf = (uint8_t *)malloc(memCap);
                 if (!memBuf) {
@@ -2153,25 +2201,25 @@ static int xscCompareSiblings(const void *lhsPtr, const void *rhsPtr, void *thun
                 throwError(err);
             }
             pageBytes += (uint64_t)n;
-            if (pageBytes > kXSCMaxPageBytes) {
+            if (pageBytes > kXSCMaxPageBytes || (sizeKnown && pageBytes > (uint64_t)declaredSize)) {
                 XSCError *err = xscMakeError(XSCArchiveErrorCorruptArchive, "Decompressed page exceeds safe limit.");
                 throwError(err);
             }
             if (spillFd >= 0) {
+                if (!xscReserveSpillBytes(spillBytes, (size_t)n)) {
+                    XSCError *err = xscMakeError(XSCArchiveErrorResourceLimit, "Archive exceeds the temporary storage limit.");
+                    throwError(err);
+                }
+                spillBytes += (uint64_t)n;
                 if (!xscWriteAll(spillFd, chunk, (size_t)n)) {
                     XSCError *err = xscMakeError(XSCArchiveErrorIOFailure, "Failed writing temporary spill file.");
                     throwError(err);
                 }
             } else {
                 if (pageBytes > memCap) {
-                    size_t newCap = memCap ? memCap : 65536u;
-                    while (newCap < pageBytes) {
-                        if (newCap > (size_t)(kXSCMaxPageBytes / 2ULL)) {
-                            newCap = (size_t)kXSCMaxPageBytes;
-                            break;
-                        }
-                        newCap *= 2u;
-                    }
+                    size_t newCap = memCap * 2u;
+                    if (newCap < pageBytes) newCap = (size_t)pageBytes;
+                    if (newCap > (uint64_t)declaredSize) newCap = (size_t)declaredSize;
                     uint8_t *grown = (uint8_t *)realloc(memBuf, newCap);
                     if (!grown) {
                         XSCError *err = xscMakeError(XSCArchiveErrorIOFailure, "Out of memory.");
@@ -2191,6 +2239,11 @@ static int xscCompareSiblings(const void *lhsPtr, const void *rhsPtr, void *thun
             throwError(err);
         }
 
+        if (sizeKnown && pageBytes != (uint64_t)declaredSize) {
+            XSCError *err = xscMakeError(XSCArchiveErrorCorruptArchive, "Incomplete archive entry.");
+            throwError(err);
+        }
+
         XSCEntry e;
         memset(&e, 0, sizeof(e));
         e.uncompressedSize = pageBytes;
@@ -2204,7 +2257,10 @@ static int xscCompareSiblings(const void *lhsPtr, const void *rhsPtr, void *thun
             if (pageBytes > 0u) {
                 if ((size_t)pageBytes < memCap / 2u) {
                     uint8_t *shrunk = (uint8_t *)realloc(memBuf, (size_t)pageBytes);
-                    if (shrunk) memBuf = shrunk;
+                    if (shrunk) {
+                        memBuf = shrunk;
+                        memCap = (size_t)pageBytes;
+                    }
                 }
                 ownedPayload = memBuf;
                 memBuf = NULL;
@@ -2214,7 +2270,7 @@ static int xscCompareSiblings(const void *lhsPtr, const void *rhsPtr, void *thun
                 XSCError *err = xscMakeError(XSCArchiveErrorIOFailure, "Out of memory.");
                 throwError(err);
             }
-            totalMemoryBytes += pageBytes;
+            totalMemoryBytes += ownedPayload ? memCap : 0u;
         }
 
         if (!xscArenaAppend2(&arena, "", 0u, trimmed, trimmedLen, true, &e.nameOffset, &e.nameLen) ||
@@ -2236,7 +2292,7 @@ static int xscCompareSiblings(const void *lhsPtr, const void *rhsPtr, void *thun
         throwError(err);
     }
 
-    qsort_r(list.items, list.count, sizeof(XSCEntry), xscCompareEntries, &arena);
+    xscSortWithContext(list.items, list.count, sizeof(XSCEntry), xscCompareEntries, &arena);
 
     XSCBook *book = [[XSCBook alloc] initWithSourcePath:sourcePath
                                                    kind:XSCBookKindLibarchive
@@ -2256,6 +2312,7 @@ static int xscCompareSiblings(const void *lhsPtr, const void *rhsPtr, void *thun
     payloads.count = 0u;
     payloads.cap = 0u;
     book->_spillDir = spillDir;
+    book->_spillBytes = spillBytes;
     spillDir = NULL;
     return book;
 }
@@ -2348,7 +2405,7 @@ static int xscCompareSiblings(const void *lhsPtr, const void *rhsPtr, void *thun
         return None(XSCString *);
     }
 
-    qsort_r(items, count, sizeof(XSCSiblingEntry), xscCompareSiblings, &arena);
+    xscSortWithContext(items, count, sizeof(XSCSiblingEntry), xscCompareSiblings, &arena);
 
     ssize_t currentIndex = -1;
     for (size_t i = 0u; i < count; i++) {
@@ -2413,7 +2470,7 @@ static int xscCompareSiblings(const void *lhsPtr, const void *rhsPtr, void *thun
 
     switch (_kind) {
         case XSCBookKindDirectory: {
-            int fd = xscOpenBookRelativeNoFollow(_rootDir, _rootDirLen, _arena.buf + e.nameOffset, e.nameLen);
+            int fd = xscOpenBookRelativeNoFollow(_fd, _arena.buf + e.nameOffset, e.nameLen);
             if (fd < 0) {
                 XSCError *err = xscMakeError(XSCArchiveErrorIOFailure, "Could not open page file.");
                 throwError(err);
@@ -2461,56 +2518,19 @@ static int xscCompareSiblings(const void *lhsPtr, const void *rhsPtr, void *thun
                 throwError(err);
             }
 
-            if (e.uncompressedSize == 0u) {
-                return [XSCData emptyData];
-            }
-
-            if (e.compressionMethod == 0u) {
-                if (e.uncompressedSize > _fileSize - payloadOff) {
-                    XSCError *err = xscMakeError(XSCArchiveErrorCorruptArchive, "Truncated STORE ZIP entry.");
-                    throwError(err);
-                }
-                XSCDataResult res = xscReadRangeFromFD(_fd, payloadOff, e.uncompressedSize, "Failed reading ZIP page.");
-                match (res) {
-                    case .Ok(let data): {
-                        return data;
-                    }
-                    case .Err(let err): {
+            XSCDataResult res = xscReadZipPage(_fd, payloadOff, e);
+            match (res) {
+                case .Ok(let data): {
+                    if (crc32_z(0u, data.bytes, data.length) != e.zipCRC32) {
+                        XSCError *err = xscMakeError(XSCArchiveErrorCorruptArchive, "ZIP page checksum mismatch.");
                         throwError(err);
                     }
+                    return data;
+                }
+                case .Err(let err): {
+                    throwError(err);
                 }
             }
-
-            if (e.compressionMethod == 8u) {
-                if (e.compressedSize == 0u || e.compressedSize > kXSCMaxPageBytes) {
-                    XSCError *err = xscMakeError(XSCArchiveErrorCorruptArchive, "Invalid compressed ZIP entry size.");
-                    throwError(err);
-                }
-                uint8_t *compBuf = (uint8_t *)malloc((size_t)e.compressedSize);
-                if (!compBuf) {
-                    XSCError *err = xscMakeError(XSCArchiveErrorIOFailure, "Out of memory.");
-                    throwError(err);
-                }
-                defer { free(compBuf); }
-
-                if (!xscPreadAll(_fd, compBuf, (size_t)e.compressedSize, (off_t)payloadOff)) {
-                    XSCError *err = xscMakeError(XSCArchiveErrorIOFailure, "Failed reading compressed ZIP page.");
-                    throwError(err);
-                }
-
-                XSCDataResult res = xscInflateRawDeflate(compBuf, (size_t)e.compressedSize, (size_t)e.uncompressedSize);
-                match (res) {
-                    case .Ok(let data): {
-                        return data;
-                    }
-                    case .Err(let err): {
-                        throwError(err);
-                    }
-                }
-            }
-
-            XSCError *err = xscMakeError(XSCArchiveErrorUnsupportedFormat, "Unsupported ZIP compression method.");
-            throwError(err);
         }
 
         case XSCBookKindTar: {
@@ -2560,7 +2580,7 @@ static int xscCompareSiblings(const void *lhsPtr, const void *rhsPtr, void *thun
                 XSCError *err = xscMakeError(XSCArchiveErrorIOFailure, "Spilled page path too long.");
                 throwError(err);
             }
-            int fd = open(spillPath, O_RDONLY | O_NOFOLLOW);
+            int fd = open(spillPath, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
             if (fd < 0) {
                 XSCError *err = xscMakeError(XSCArchiveErrorIOFailure, "Could not open spilled page.");
                 throwError(err);
