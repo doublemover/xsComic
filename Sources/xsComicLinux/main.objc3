@@ -241,7 +241,7 @@ static bool xsc_png_write_rows(png_structp png,
     return true;
 }
 
-static bool xsc_write_rgba_png(const char *path, int width, int height, const uint8_t *rgbaBottomUp) {
+static bool xsc_write_rgba_png(const char *path, mode_t mode, int width, int height, const uint8_t *rgbaBottomUp) {
     if (!path || width <= 0 || height <= 0 || !rgbaBottomUp) return false;
     const char *slash = strrchr(path, '/');
     size_t directoryLength = slash ? (size_t)(slash - path) + 1u : 0u;
@@ -253,7 +253,7 @@ static bool xsc_write_rgba_png(const char *path, int width, int height, const ui
 
     int fd = mkostemp(tempPath, O_CLOEXEC);
     if (fd < 0) return false;
-    defer { unlink(tempPath); }
+    defer { if (tempPath[0] != '\0') unlink(tempPath); }
 
     FILE *fp = fdopen(fd, "wb");
     if (!fp) {
@@ -269,9 +269,12 @@ static bool xsc_write_rgba_png(const char *path, int width, int height, const ui
     if (!info) return false;
 
     bool ok = xsc_png_write_rows(png, info, fp, width, height, rgbaBottomUp);
+    if (ok && (fflush(fp) != 0 || fchmod(fd, mode) != 0)) ok = false;
     if (fclose(fp) != 0) ok = false;
     fp = NULL;
-    return ok && rename(tempPath, path) == 0;
+    if (!ok || rename(tempPath, path) != 0) return false;
+    tempPath[0] = '\0';
+    return true;
 }
 
 #pragma mark - OpenGL 3.3 2D Chrome & Typography Renderer
@@ -1164,8 +1167,11 @@ static int xsc_spawn_file_picker(pid_t *pid, int *readFd) {
 
     rc = posix_spawn_file_actions_adddup2(&actions, fds[1], STDOUT_FILENO);
     if (rc != 0) return rc;
+    rc = posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
+    if (rc != 0) return rc;
 
-    const char *directory = getenv("XSCOMIC_HOST_LIBRARY_DIR") ? "/comics/" : "./";
+    const char *hostLibrary = getenv("XSCOMIC_HOST_LIBRARY_DIR");
+    const char *directory = (hostLibrary && hostLibrary[0] != '\0') ? "/comics/" : "./";
     char initialDirectory[32];
     snprintf(initialDirectory, sizeof(initialDirectory), "--filename=%s", directory);
     char *zenity[] = { "zenity", "--file-selection", "--title=Open Comic Book",
@@ -1238,7 +1244,7 @@ static void xsc_sdl_wakeup(void) {
 - (XSCScreenshotState)screenshotState;
 - (XSCString *)screenshotError;
 - (void)closeFilePicker;
-- (bool)captureScreenshotToPath:(const char *)path;
+- (bool)captureScreenshotToPath:(const char *)path mode:(mode_t)mode;
 
 @end
 
@@ -2669,7 +2675,7 @@ static const uint64_t kXSCCaretHalfPeriodMs = 530u;
     return _hasDisplayedStatus ? [XSCString stringWithUTF8:"The requested page could not be decoded."] : nil;
 }
 
-- (bool)captureScreenshotToPath:(const char *)path {
+- (bool)captureScreenshotToPath:(const char *)path mode:(mode_t)mode {
     [self syncWindowMetrics];
     [self renderSceneToBackbuffer];
 
@@ -2682,7 +2688,7 @@ static const uint64_t kXSCCaretHalfPeriodMs = 530u;
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
     glReadPixels(0, 0, _drawableW, _drawableH, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
 
-    return xsc_write_rgba_png(path, _drawableW, _drawableH, pixels);
+    return xsc_write_rgba_png(path, mode, _drawableW, _drawableH, pixels);
 }
 
 @end
@@ -2841,6 +2847,14 @@ int main(int argc, char *argv[]) {
     XSCCLIResult parsed = xsc_parse_cli(argc, argv, &opts);
     if (parsed != XSCCLIRun) return parsed == XSCCLIHelp ? 0 : 2;
 
+    // Capture the output mode before SDL or the reader can start threads.
+    mode_t screenshotMode = 0;
+    if (opts.screenshotPath) {
+        mode_t mask = umask(0);
+        umask(mask);
+        screenshotMode = (mode_t)(0666 & ~mask);
+    }
+
     // Enable UTF-8 LC_CTYPE (without touching LC_NUMERIC) so X11's
     // Xutf8TextListToTextProperty updates _NET_WM_NAME for non-ASCII titles.
     const char *ctype = setlocale(LC_CTYPE, "");
@@ -2951,6 +2965,10 @@ int main(int argc, char *argv[]) {
                                                                  options:&opts];
         defer { [app closeFilePicker]; }
         if (opts.screenshotPath) exitCode = 1;
+        static const uint64_t kXSCScreenshotTimeoutMs = 30000ULL;
+        uint64_t screenshotDeadlineMs = opts.screenshotPath
+            ? ((uint64_t)xsc_now_ms() + kXSCScreenshotTimeoutMs)
+            : UINT64_MAX;
 
         while (!app.shouldQuit) {
             uint64_t nowMs = (uint64_t)xsc_now_ms();
@@ -2963,11 +2981,15 @@ int main(int argc, char *argv[]) {
                     break;
                 }
                 if (state == XSCScreenshotReady) {
-                    if ([app captureScreenshotToPath:opts.screenshotPath]) {
+                    if ([app captureScreenshotToPath:opts.screenshotPath mode:screenshotMode]) {
                         exitCode = 0;
                     } else {
                         fprintf(stderr, "xscomic: failed to write screenshot to %s\n", opts.screenshotPath);
                     }
+                    break;
+                }
+                if (nowMs >= screenshotDeadlineMs) {
+                    fprintf(stderr, "xscomic: timed out waiting for screenshot to render\n");
                     break;
                 }
             }
@@ -2976,7 +2998,14 @@ int main(int argc, char *argv[]) {
                 [app renderFrame];
             }
 
-            int waitMs = [app eventWaitAtMs:(uint64_t)xsc_now_ms()];
+            uint64_t waitNowMs = (uint64_t)xsc_now_ms();
+            int waitMs = [app eventWaitAtMs:waitNowMs];
+            if (opts.screenshotPath && screenshotDeadlineMs < UINT64_MAX) {
+                uint64_t remaining = (screenshotDeadlineMs > waitNowMs) ? (screenshotDeadlineMs - waitNowMs) : 0ULL;
+                if (remaining < (uint64_t)waitMs) {
+                    waitMs = (int)remaining;
+                }
+            }
             SDL_Event ev;
             if (SDL_WaitEventTimeout(&ev, waitMs)) {
                 [app handleSDLEvent:&ev];

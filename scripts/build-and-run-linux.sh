@@ -216,15 +216,19 @@ if ! is_native_objc3_linux; then
             fi
             if [[ -S "$wayland_socket" ]]; then
                 add_docker_bind "$wayland_socket" /tmp/xscomic-wayland readonly
-                DOCKER_FLAGS+=(--run-arg -e --run-arg WAYLAND_DISPLAY=/tmp/xscomic-wayland
-                               --run-arg -e --run-arg XDG_RUNTIME_DIR=/tmp)
+                DOCKER_FLAGS+=(--run-arg -e --run-arg WAYLAND_DISPLAY=/tmp/xscomic-wayland)
             fi
         fi
         if [[ -d /dev/dri ]]; then
             DOCKER_FLAGS+=(--run-arg --device --run-arg /dev/dri:/dev/dri)
+            seen_gids=":"
             for render_node in /dev/dri/renderD*; do
                 [[ -c "$render_node" ]] || continue
-                DOCKER_FLAGS+=(--run-arg --group-add --run-arg "$(stat -c '%g' "$render_node")")
+                gid=$(stat -c '%g' "$render_node")
+                if [[ "$seen_gids" != *":$gid:"* ]]; then
+                    seen_gids+="$gid:"
+                    DOCKER_FLAGS+=(--run-arg --group-add --run-arg "$gid")
+                fi
             done
         fi
     fi
@@ -289,6 +293,15 @@ if [[ -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" && "${SDL_VIDEODRIVER:-}" !
     echo "Error: neither DISPLAY nor WAYLAND_DISPLAY is set." >&2
     echo "Run interactively on a Linux X11/Wayland session, set XSCOMIC_USE_XVFB=1, or pass --screenshot <out.png>." >&2
     exit 1
+fi
+
+if [[ "${XSCOMIC_DOCKER_DELEGATED:-0}" == "1" && -n "${WAYLAND_DISPLAY:-}" && -z "${XDG_RUNTIME_DIR:-}" ]]; then
+    RUNTIME_DIR=$(mktemp -d /tmp/xscomic-runtime-XXXXXX)
+    chmod 0700 "$RUNTIME_DIR"
+    export XDG_RUNTIME_DIR="$RUNTIME_DIR"
+    trap 'rm -rf "$RUNTIME_DIR"' EXIT
+    "$BIN" ${APP_ARGS[@]+"${APP_ARGS[@]}"}
+    exit $?
 fi
 
 exec "$BIN" ${APP_ARGS[@]+"${APP_ARGS[@]}"}

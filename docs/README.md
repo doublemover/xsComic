@@ -17,7 +17,8 @@ Raw JSON measurements live in [`../Metrics/`](../Metrics/), including the Linux 
 │   └── xsComicLinux/         Linux Objective-C 3.0 / SDL2 / OpenGL 3.3 application (.h, .objc3)
 ├── Tests/
 │   ├── xsComicTests/         macOS standalone test and benchmark suite (main.m)
-│   └── xsComicLinuxTests/    Linux standalone test and benchmark suite (main.objc3, 183 assertions)
+│   └── xsComicLinuxTests/    Linux core test/benchmark suite (main.objc3, 191 assertions) & E2E smoke (smoke.py)
+├── .github/workflows/        Linux (x86-64/AArch64) and macOS (arm64) CI workflows
 ├── docker/
 │   └── Dockerfile            Debian 13 + pinned Slopjective-C SDK (v0.1.0-preview.2) toolchain image
 ├── Assets/                   compiled Assets.car, alternate SVG, and brand masters
@@ -71,8 +72,11 @@ for Developer ID signing and notarization.
 # Build an unoptimized debug binary with symbols (-O0 -g).
 ./scripts/build-linux.sh --debug
 
-# Run the standalone Linux test and benchmark suite (183 assertions).
+# Run the standalone Linux test and benchmark suite (191 assertions).
 ./scripts/run-linux-tests.sh
+
+# Run the E2E rendered-pixel and X11 interaction smoke suite.
+./scripts/docker-env.sh xvfb-run -a python3 Tests/xsComicLinuxTests/smoke.py build/linux/xscomic --x11
 
 # Build and launch xsComic (interactive X11/Wayland or headless --screenshot).
 ./scripts/build-and-run-linux.sh [args...]

@@ -5,6 +5,7 @@ import io
 import os
 from pathlib import Path
 import signal
+from stat import S_IMODE
 import subprocess
 from tempfile import TemporaryDirectory
 import time
@@ -30,7 +31,7 @@ def test_rendering(app, directory, env):
     settings = ("--single", "--size=800x600")
 
     def run(*arguments):
-        return subprocess.run([app, *arguments], env=env, capture_output=True, text=True, timeout=30)
+        return subprocess.run([app, *arguments], env=env, capture_output=True, text=True, timeout=30, umask=0o027)
 
     def capture(name, book=None, *options):
         output = directory / f"{name}.png"
@@ -39,6 +40,7 @@ def test_rendering(app, directory, env):
             args.append(book)
         result = run(*args)
         assert result.returncode == 0, result.stderr
+        assert S_IMODE(output.stat().st_mode) == 0o640
         with Image.open(output) as screenshot:
             assert screenshot.size == (800, 600), screenshot.size
             return screenshot.convert("RGB")
@@ -97,10 +99,26 @@ def test_rendering(app, directory, env):
         edge.paste((220, 30, 20, 255), (0, 0, 64, 96))
         return make_comic(directory / f"{name}.cbz", [("01.png", image_bytes(edge, "PNG"))])
 
-    clean = capture("alpha-edge-clean", edge_book("clean-edge", (0, 0, 0)))
-    hidden = capture("alpha-edge-hidden", edge_book("hidden-edge", (0, 255, 0)))
+    clean_book = edge_book("clean-edge", (0, 0, 0))
+    hidden_book = edge_book("hidden-edge", (0, 255, 0))
+    clean = capture("alpha-edge-clean", clean_book)
+    hidden = capture("alpha-edge-hidden", hidden_book)
     assert ImageChops.difference(clean, hidden).crop((300, 150, 500, 500)).getbbox() is None
+    # Also verify hidden RGB does not bleed through the 2x Lanczos-3 downscale path.
+    clean_down = capture("alpha-edge-clean-down", clean_book, "--zoom=0.5")
+    hidden_down = capture("alpha-edge-hidden-down", hidden_book, "--zoom=0.5")
+    assert ImageChops.difference(clean_down, hidden_down).crop((300, 150, 500, 500)).getbbox() is None
 
+    # 2x downscale uses Lanczos-3 for crisp manga lineart/screentones.
+    bars = Image.new("L", (512, 512))
+    bar_row = bytes(0 if (x % 4) < 2 else 255 for x in range(512))
+    bars.frombytes(bar_row * 512)
+    bars_book = make_comic(directory / "bars.cbz", [("01.png", image_bytes(bars, "PNG"))])
+    lanczos = capture("bars-2x", bars_book, "--zoom=0.5").crop((360, 280, 440, 360))
+    lum = [r for r, _, _ in lanczos.getdata()]
+    assert min(lum) < 40 and max(lum) > 215, (min(lum), max(lum))
+
+    # Extreme (>3x) downscale switches lazily to trilinear mipmaps to stay alias-free.
     checker = Image.new("L", (1024, 1024))
     pixels = bytes((0, 255)) * 512 + bytes((255, 0)) * 512
     checker.frombytes(pixels * 512)

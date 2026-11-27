@@ -57,10 +57,11 @@ typedef struct XSCRectF {
 typedef void (^XSCZoomChangedBlock)(XSCZoomMode mode, float effectiveScale);
 
 /*
- XSCGLCanvas renders comic pages directly through OpenGL 3.3 Core with an
- mipmapped minification, an EXIF 1..8 orientation transform,
- .rrr1 grayscale swizzling for GL_R8 manga textures, 1 px hairline page
- borders, focal-point zooming, drag panning, and multi-frame GIF playback.
+ XSCGLCanvas renders comic pages directly through OpenGL 3.3 Core with hybrid
+ Lanczos-3 (1.05x-3x) and lazy trilinear mipmap (>3x) downscaling, an EXIF 1..8
+ orientation transform, .rrr1 grayscale swizzling for GL_R8 manga textures, 1 px
+ hairline page borders, focal-point zooming, drag panning, and multi-frame GIF
+ playback.
  */
 @interface XSCGLCanvas : XSCObject
 
